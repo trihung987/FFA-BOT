@@ -53,19 +53,26 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 # 2. Send check-in embed to the check-in channel
                 checkin_channel = bot.get_channel(CHECKIN_CHANNEL_ID)
                 if checkin_channel:
-                    from views import CheckInView
-                    embed = discord.Embed(
-                        title="📋 Check-in FFA Match",
-                        description=(
-                            f"**Match #{match.id}** – Đã đến giờ check-in!\n"
-                            f"Trận bắt đầu lúc {format_vn_time(time_start)}.\n\n"
-                            "Nhấn **Check-in** để xác nhận tham gia."
-                        ),
-                        color=discord.Color.green(),
+                    from views import CheckInView, build_checkin_embed, _load_player_map
+
+                    registered = match.register_users_id or []
+
+                    # Build the initial check-in embed with current player names
+                    with db_session_factory() as session:
+                        db_match = session.get(Match, match.id)
+                        if db_match is None:
+                            continue
+                        p_map = _load_player_map(session, registered)
+                        embed = build_checkin_embed(db_match, p_map)
+
+                    # Tag all registered players so they receive a notification
+                    content = (
+                        " ".join(f"<@{uid}>" for uid in registered) if registered else ""
                     )
-                    embed.set_footer(text=f"Match ID: {match.id}")
                     view = CheckInView(match_id=match.id, db_session_factory=db_session_factory)
-                    checkin_msg = await checkin_channel.send(embed=embed, view=view)
+                    checkin_msg = await checkin_channel.send(
+                        content=content, embed=embed, view=view
+                    )
 
                     # 3. Persist the check-in message ID
                     with db_session_factory() as session:

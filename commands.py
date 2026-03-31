@@ -57,3 +57,28 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             register_channel=register_channel,
         )
         await interaction.response.send_modal(modal)
+
+    @bot.tree.command(
+        name="set_ingame_name",
+        description="Đặt tên in-game của bạn để hiển thị trong danh sách đăng ký và check-in.",
+        guild=guild_obj,
+    )
+    @app_commands.describe(name="Tên in-game của bạn trong game")
+    async def set_ingame_name(interaction: discord.Interaction, name: str) -> None:
+        """Allow a player to set (or update) their in-game name."""
+        from entity import User
+
+        user_id = interaction.user.id
+
+        with db_session_factory() as session:
+            user = session.get(User, user_id)
+            if user is None:
+                user = User(id=user_id, ingame_name=name)
+                session.add(user)
+            else:
+                user.ingame_name = name
+            session.commit()
+
+        await interaction.response.send_message(
+            f"✅ Đã cập nhật tên in-game: **{name}**", ephemeral=True
+        )

@@ -40,6 +40,8 @@ class User(Base):
 
     # Use the Discord snowflake (user ID) as the primary key
     id = Column(BigInteger, primary_key=True)
+    # In-game name set by the player via /set_ingame_name
+    ingame_name = Column(String(64), nullable=True)
     elo = Column(Integer, nullable=False, default=1000)
     ticket = Column(Integer, nullable=False, default=0)
     created_date = Column(DateTime, nullable=False, server_default=func.now())
