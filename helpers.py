@@ -1,7 +1,25 @@
+import re
 from datetime import datetime, timedelta, timezone
 
 # Vietnam Standard Time - UTC+7 (no DST)
 VN_TZ = timezone(timedelta(hours=7))
+
+
+def parse_duration(value: str) -> timedelta:
+    """Convert a human-readable duration string to a :class:`timedelta`.
+
+    Supported formats:
+    - ``"1h"``  → 1 hour
+    - ``"30p"`` → 30 minutes
+    """
+    m = re.fullmatch(r"(\d+)([hp])", value.strip().lower())
+    if not m:
+        raise ValueError(f"Unrecognised duration format: {value!r}")
+    amount = int(m.group(1))
+    unit = m.group(2)
+    if unit == "h":
+        return timedelta(hours=amount)
+    return timedelta(minutes=amount)
 
 
 def now_vn() -> datetime:

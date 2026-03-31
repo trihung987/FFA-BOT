@@ -54,14 +54,14 @@ class MapNamesModal(discord.ui.Modal):
             self.add_item(field)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        from datetime import datetime
         from entity import Match
-        from helpers import format_vn_time
+        from helpers import format_vn_time, parse_duration
 
         map_names = [field.value for field in self._map_inputs]
 
         # Parse time_start string into a datetime object (Vietnam local time)
         try:
-            from datetime import datetime
             time_start_dt = datetime.strptime(self.time_start, "%Y-%m-%d %H:%M")
         except ValueError:
             await interaction.response.send_message(
@@ -69,6 +69,30 @@ class MapNamesModal(discord.ui.Modal):
                 ephemeral=True,
             )
             return
+
+        # Parse and validate duration fields; compute exact open times
+        try:
+            checkin_open_dt = time_start_dt - parse_duration(self.time_reach_checkin)
+        except ValueError:
+            await interaction.response.send_message(
+                f"❌ Định dạng thời gian check-in không hợp lệ: {self.time_reach_checkin!r}. "
+                "Vui lòng dùng: 1h hoặc 30p",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            divide_open_dt = time_start_dt - parse_duration(self.time_reach_divide_lobby)
+        except ValueError:
+            await interaction.response.send_message(
+                f"❌ Định dạng thời gian chia lobby không hợp lệ: {self.time_reach_divide_lobby!r}. "
+                "Vui lòng dùng: 1h hoặc 30p",
+                ephemeral=True,
+            )
+            return
+
+        checkin_display = f"{format_vn_time(checkin_open_dt)} → {format_vn_time(time_start_dt)}"
+        divide_display = f"{format_vn_time(divide_open_dt)} → {format_vn_time(time_start_dt)}"
 
         # Save the match to the database
         with self.db_session_factory() as session:
@@ -92,8 +116,8 @@ class MapNamesModal(discord.ui.Modal):
             description=(
                 f"**Số trận:** {self.count_fight}\n"
                 f"**Giờ bắt đầu:** {format_vn_time(time_start_dt)}\n"
-                f"**Check-in trước:** {self.time_reach_checkin}\n"
-                f"**Chia lobby trước:** {self.time_reach_divide_lobby}\n\n"
+                f"**Check-in:** {checkin_display}\n"
+                f"**Chia lobby:** {divide_display}\n\n"
                 f"**Maps:** {', '.join(map_names)}\n\n"
                 "Nhấn **Tham gia** để đăng ký hoặc **Hủy đăng ký** để rút tên."
             ),
