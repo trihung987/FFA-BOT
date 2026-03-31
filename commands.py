@@ -219,6 +219,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
     ) -> None:
         """Display a rich embed with a player's FFA stats."""
         from entity import User
+        from helpers import get_rank
 
         with db_session_factory() as session:
             user = session.get(User, player.id)
@@ -243,6 +244,8 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         monthly = user.monthly_elo_gain or 0
         monthly_str = f"🔥 +{monthly}" if monthly > 0 else "—"
 
+        rank_str = get_rank(user.elo)
+
         embed = discord.Embed(
             title=f"🎮 Hồ Sơ FFA — {player.display_name}",
             color=discord.Color.blurple(),
@@ -250,6 +253,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         embed.set_thumbnail(url=player.display_avatar.url)
         embed.add_field(name="🕹️ Tên in-game", value=user.ingame_name or "_chưa đặt_", inline=True)
         embed.add_field(name="⚔️ ELO", value=f"**{user.elo}**", inline=True)
+        embed.add_field(name="🏅 Hạng", value=rank_str, inline=True)
         embed.add_field(name="🎫 Vé", value=str(user.ticket), inline=True)
         embed.add_field(name="📈 Biến động gần nhất", value=change_str, inline=True)
         embed.add_field(name="🔥 ELO tăng tháng này", value=monthly_str, inline=True)

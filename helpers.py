@@ -39,3 +39,36 @@ def format_vnd(amount: int) -> str:
 def format_vn_time(dt: datetime) -> str:
     """Format: 14:30 - Ngày 25/12/2026"""
     return dt.strftime("%H:%M - Ngày %d/%m/%Y")
+
+
+# ELO tier thresholds (inclusive lower bound, exclusive upper bound)
+_RANKS = [
+    (2100, "🏆 Challenger"),
+    (1800, "🌟 Legendary"),
+    (1500, "💎 Diamond"),
+    (1200, "🔷 Platinum"),
+    (1000, "🥇 Gold"),
+    (700,  "🥈 Silver"),
+    (0,    "🥉 Bronze"),
+]
+
+
+def get_rank(elo: int) -> str:
+    """Return the rank label (with emoji) that corresponds to *elo*.
+
+    Tiers (ascending):
+        Bronze     –   0 – 699
+        Silver     – 700 – 999
+        Gold       – 1 000 – 1 199
+        Platinum   – 1 200 – 1 499
+        Diamond    – 1 500 – 1 799
+        Legendary  – 1 800 – 2 099
+        Challenger – 2 100 +
+
+    Negative ELO (should not occur in practice) maps to Bronze.
+    """
+    for threshold, label in _RANKS:
+        if elo >= threshold:
+            return label
+    # Defensive: negative ELO falls back to the lowest tier
+    return "🥉 Bronze"
