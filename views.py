@@ -126,7 +126,14 @@ class MapNamesModal(discord.ui.Modal):
         embed.set_footer(text=f"Match ID: {match_id}")
 
         view = RegistrationView(match_id=match_id, db_session_factory=self.db_session_factory)
-        await self.register_channel.send(embed=embed, view=view)
+        reg_msg = await self.register_channel.send(embed=embed, view=view)
+
+        # Persist the registration message ID so the scheduler can disable it later
+        with self.db_session_factory() as session:
+            db_match = session.get(Match, match_id)
+            if db_match is not None:
+                db_match.register_message_id = reg_msg.id
+                session.commit()
 
         await interaction.response.send_message(
             f"✅ Đã mở đăng ký cho match #{match_id}!", ephemeral=True
@@ -200,4 +207,53 @@ class RegistrationView(discord.ui.View):
 
         await interaction.response.send_message(
             f"✅ **{interaction.user.display_name}** đã hủy đăng ký.", ephemeral=True
+        )
+
+
+# ── View: check-in embed with Check-in button ─────────────────────────────────
+
+
+class CheckInView(discord.ui.View):
+    """
+    Persistent view attached to the check-in embed.
+    Provides a **Check-in** button for registered players to confirm attendance.
+    """
+
+    def __init__(self, match_id: int, db_session_factory) -> None:
+        super().__init__(timeout=None)
+        self.match_id = match_id
+        self.db_session_factory = db_session_factory
+
+    @discord.ui.button(label="Check-in", style=discord.ButtonStyle.primary, emoji="✅")
+    async def checkin(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        from entity import Match
+
+        user_id = interaction.user.id
+
+        with self.db_session_factory() as session:
+            match: Match | None = session.get(Match, self.match_id)
+            if match is None:
+                await interaction.response.send_message("❌ Match không tồn tại.", ephemeral=True)
+                return
+
+            registered: list = match.register_users_id or []
+            if user_id not in registered:
+                await interaction.response.send_message(
+                    "⚠️ Bạn chưa đăng ký tham gia match này!", ephemeral=True
+                )
+                return
+
+            checked_in: list = (match.checkin_users_id or []).copy()
+            if user_id in checked_in:
+                await interaction.response.send_message(
+                    "⚠️ Bạn đã check-in rồi!", ephemeral=True
+                )
+                return
+
+            checked_in.append(user_id)
+            match.checkin_users_id = checked_in
+            session.commit()
+
+        await interaction.response.send_message(
+            f"✅ **{interaction.user.display_name}** đã check-in thành công!", ephemeral=True
         )

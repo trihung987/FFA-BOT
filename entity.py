@@ -27,6 +27,10 @@ class Match(Base):
     time_reach_divide_lobby = Column(String(20), nullable=False)
     # Time when the match ends
     end_time = Column(DateTime, nullable=True)
+    # Discord message ID of the registration embed (set after the message is sent)
+    register_message_id = Column(BigInteger, nullable=True)
+    # Discord message ID of the check-in embed (set when check-in is triggered)
+    checkin_message_id = Column(BigInteger, nullable=True)
 
 
 class User(Base):

@@ -7,7 +7,7 @@ from __future__ import annotations
 import discord
 from discord.ext import tasks, commands as ext_commands
 
-from config import CHECKIN_CHANNEL_ID, DIVIDE_LOBBY_CHANNEL_ID
+from config import CHECKIN_CHANNEL_ID, DIVIDE_LOBBY_CHANNEL_ID, REGISTER_CHANNEL_ID
 from entity import Match
 from helpers import now_vn, format_vn_time, parse_duration
 
@@ -40,12 +40,39 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 continue
             checkin_time = time_start - checkin_delta
             if abs((now - checkin_time).total_seconds()) < 60:
-                channel = bot.get_channel(CHECKIN_CHANNEL_ID)
-                if channel:
-                    await channel.send(
-                        f"🔔 **Match #{match.id}** – Đã đến giờ check-in! "
-                        f"Trận bắt đầu lúc {format_vn_time(time_start)}."
+                # 1. Disable the registration message so users can no longer join/cancel
+                register_channel = bot.get_channel(REGISTER_CHANNEL_ID)
+                if register_channel and match.register_message_id:
+                    try:
+                        reg_msg = await register_channel.fetch_message(match.register_message_id)
+                        # Passing an empty View removes all action-row components from the message
+                        await reg_msg.edit(view=discord.ui.View())
+                    except discord.NotFound:
+                        pass
+
+                # 2. Send check-in embed to the check-in channel
+                checkin_channel = bot.get_channel(CHECKIN_CHANNEL_ID)
+                if checkin_channel:
+                    from views import CheckInView
+                    embed = discord.Embed(
+                        title="📋 Check-in FFA Match",
+                        description=(
+                            f"**Match #{match.id}** – Đã đến giờ check-in!\n"
+                            f"Trận bắt đầu lúc {format_vn_time(time_start)}.\n\n"
+                            "Nhấn **Check-in** để xác nhận tham gia."
+                        ),
+                        color=discord.Color.green(),
                     )
+                    embed.set_footer(text=f"Match ID: {match.id}")
+                    view = CheckInView(match_id=match.id, db_session_factory=db_session_factory)
+                    checkin_msg = await checkin_channel.send(embed=embed, view=view)
+
+                    # 3. Persist the check-in message ID
+                    with db_session_factory() as session:
+                        db_match = session.get(Match, match.id)
+                        if db_match is not None:
+                            db_match.checkin_message_id = checkin_msg.id
+                            session.commit()
 
             # --- Lobby-division reminder ---
             try:
