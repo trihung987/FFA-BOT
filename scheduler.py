@@ -8,18 +8,19 @@ import discord
 from discord.ext import tasks, commands as ext_commands
 
 from config import CHECKIN_CHANNEL_ID, DIVIDE_LOBBY_CHANNEL_ID, REGISTER_CHANNEL_ID
-from entity import Match
+from entity import Match, User
 from helpers import now_vn, format_vn_time, parse_duration
 
 
 def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
     """
-    Create and return the two periodic task loops:
+    Create and return the three periodic task loops:
 
-    - ``match_scheduler`` – checks for upcoming check-in windows and posts reminders.
-    - ``cleanup_scheduler`` – marks finished matches with an end_time.
+    - ``match_scheduler``         – checks for upcoming check-in windows and posts reminders.
+    - ``cleanup_scheduler``       – marks finished matches with an end_time.
+    - ``monthly_reset_scheduler`` – resets monthly_elo_gain for all users on the 1st of each month.
 
-    The caller is responsible for starting / stopping both loops.
+    The caller is responsible for starting / stopping all loops.
     """
 
     @tasks.loop(minutes=1)
@@ -109,4 +110,25 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 match.end_time = now
             session.commit()
 
-    return match_scheduler, cleanup_scheduler
+    @tasks.loop(hours=1)
+    async def monthly_reset_scheduler() -> None:
+        """Reset monthly_elo_gain for all users once per calendar month.
+
+        We track the last month that was reset in a closure variable so the
+        reset fires exactly once even if the hourly tick happens to run at
+        00:15 or 00:45 instead of exactly 00:00.
+        """
+        now = now_vn()
+        current_month = (now.year, now.month)
+        if now.day == 1 and current_month != monthly_reset_scheduler._last_reset_month:
+            monthly_reset_scheduler._last_reset_month = current_month
+            with db_session_factory() as session:
+                session.query(User).update(
+                    {User.monthly_elo_gain: 0}, synchronize_session=False
+                )
+                session.commit()
+
+    # Initialise the tracking attribute before the loop is ever started
+    monthly_reset_scheduler._last_reset_month = (None, None)
+
+    return match_scheduler, cleanup_scheduler, monthly_reset_scheduler
