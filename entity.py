@@ -44,6 +44,10 @@ class User(Base):
     ingame_name = Column(String(64), nullable=True)
     elo = Column(Integer, nullable=False, default=1000)
     ticket = Column(Integer, nullable=False, default=0)
+    # ELO delta from the most recent change (positive = gained, negative = lost)
+    last_elo_change = Column(Integer, nullable=False, default=0)
+    # Cumulative ELO gains (positive only) within the current calendar month
+    monthly_elo_gain = Column(Integer, nullable=False, default=0)
     created_date = Column(DateTime, nullable=False, server_default=func.now())
     updated_date = Column(
         DateTime,

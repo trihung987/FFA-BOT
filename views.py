@@ -240,11 +240,20 @@ class RegistrationView(discord.ui.View):
 
     @discord.ui.button(label="Tham gia", style=discord.ButtonStyle.success, emoji="✅")
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        from entity import Match
+        from entity import Match, User
 
         user_id = interaction.user.id
 
         with self.db_session_factory() as session:
+            # Ensure the player has set up their profile first
+            player = session.get(User, user_id)
+            if player is None:
+                await interaction.response.send_message(
+                    "❌ Bạn chưa có hồ sơ FFA. Vui lòng dùng `/set_ingame_name` trước khi đăng ký.",
+                    ephemeral=True,
+                )
+                return
+
             match: Match | None = session.get(Match, self.match_id)
             if match is None:
                 await interaction.response.send_message("❌ Match không tồn tại.", ephemeral=True)
@@ -315,11 +324,20 @@ class CheckInView(discord.ui.View):
 
     @discord.ui.button(label="Sẵn sàng ✅", style=discord.ButtonStyle.primary)
     async def ready(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        from entity import Match
+        from entity import Match, User
 
         user_id = interaction.user.id
 
         with self.db_session_factory() as session:
+            # Ensure the player has set up their profile first
+            player = session.get(User, user_id)
+            if player is None:
+                await interaction.response.send_message(
+                    "❌ Bạn chưa có hồ sơ FFA. Vui lòng dùng `/set_ingame_name` trước khi check-in.",
+                    ephemeral=True,
+                )
+                return
+
             match: Match | None = session.get(Match, self.match_id)
             if match is None:
                 await interaction.response.send_message("❌ Match không tồn tại.", ephemeral=True)
