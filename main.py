@@ -24,6 +24,9 @@ bot = commands.Bot(command_prefix="/", intents=intents)
 register_match_commands(bot, SessionLocal)
 register_leaderboard_commands(bot, SessionLocal)
 
+# Create background schedulers (they are started inside on_ready)
+match_scheduler, cleanup_scheduler = setup_scheduler(bot, SessionLocal)
+
 
 # ── Global error handler ───────────────────────────────────────────────────────
 
