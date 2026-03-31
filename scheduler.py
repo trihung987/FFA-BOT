@@ -5,13 +5,14 @@ Background task schedulers for check-in and lobby-division reminders.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import discord
 from discord.ext import tasks, commands as ext_commands
 
 from config import CHECKIN_CHANNEL_ID, DIVIDE_LOBBY_CHANNEL_ID
 from entity import Match
+from helpers import now_vn, format_vn_time
 
 
 def _parse_duration(value: str) -> timedelta:
@@ -45,13 +46,13 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
     @tasks.loop(minutes=1)
     async def match_scheduler() -> None:
         """Remind players when check-in or lobby-division time is reached."""
-        now = datetime.utcnow()
+        now = now_vn()
 
         with db_session_factory() as session:
             pending = session.query(Match).filter(Match.end_time.is_(None)).all()
 
         for match in pending:
-            time_start: datetime = match.time_start
+            time_start = match.time_start
 
             # --- Check-in reminder ---
             try:
@@ -64,7 +65,7 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 if channel:
                     await channel.send(
                         f"🔔 **Match #{match.id}** – Đã đến giờ check-in! "
-                        f"Trận bắt đầu lúc {time_start.strftime('%H:%M %d/%m/%Y')}."
+                        f"Trận bắt đầu lúc {format_vn_time(time_start)}."
                     )
 
             # --- Lobby-division reminder ---
@@ -83,7 +84,7 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
     @tasks.loop(minutes=5)
     async def cleanup_scheduler() -> None:
         """Mark matches that have passed their start time as ended."""
-        now = datetime.utcnow()
+        now = now_vn()
 
         with db_session_factory() as session:
             pending = (

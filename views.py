@@ -54,13 +54,14 @@ class MapNamesModal(discord.ui.Modal):
             self.add_item(field)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        from datetime import datetime
         from entity import Match
+        from helpers import format_vn_time
 
         map_names = [field.value for field in self._map_inputs]
 
-        # Parse time_start string into a datetime object
+        # Parse time_start string into a datetime object (Vietnam local time)
         try:
+            from datetime import datetime
             time_start_dt = datetime.strptime(self.time_start, "%Y-%m-%d %H:%M")
         except ValueError:
             await interaction.response.send_message(
@@ -90,7 +91,7 @@ class MapNamesModal(discord.ui.Modal):
             title="🎮 Đăng Ký Tham Gia FFA Match",
             description=(
                 f"**Số trận:** {self.count_fight}\n"
-                f"**Giờ bắt đầu:** {time_start_dt.strftime('%d/%m/%Y %H:%M')}\n"
+                f"**Giờ bắt đầu:** {format_vn_time(time_start_dt)}\n"
                 f"**Check-in trước:** {self.time_reach_checkin}\n"
                 f"**Chia lobby trước:** {self.time_reach_divide_lobby}\n\n"
                 f"**Maps:** {', '.join(map_names)}\n\n"
