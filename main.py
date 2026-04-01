@@ -2,6 +2,8 @@
 Entry point – assembles the bot from its modules and starts it.
 """
 
+import logging
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -11,6 +13,18 @@ from database import SessionLocal
 from commands import register_match_commands
 from leaderboard import register_leaderboard_commands
 from scheduler import setup_scheduler
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("bot.log", encoding="utf-8"),
+    ],
+)
+log = logging.getLogger(__name__)
 
 guild_obj = discord.Object(id=GUILD_ID)
 
@@ -32,18 +46,46 @@ match_scheduler, cleanup_scheduler, monthly_reset_scheduler, message_cleanup_sch
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    cmd_name = interaction.command.name if interaction.command else "unknown"
+    user_id = interaction.user.id
+
     if isinstance(error, app_commands.errors.CheckFailure):
         if not interaction.response.is_done():
-            await interaction.response.send_message(
-                "❌ Bạn không thể sử dụng lệnh này tại đây!", ephemeral=True
-            )
+            try:
+                await interaction.response.send_message(
+                    "❌ Bạn không thể sử dụng lệnh này tại đây!", ephemeral=True
+                )
+            except discord.NotFound as exc:
+                if exc.code == 10062:
+                    log.warning(
+                        "Interaction expired while sending CheckFailure response "
+                        "(command=%r, user=%s)", cmd_name, user_id
+                    )
+                else:
+                    log.error(
+                        "NotFound error sending CheckFailure response "
+                        "(command=%r, user=%s): %s", cmd_name, user_id, exc
+                    )
+            except discord.HTTPException as exc:
+                log.error(
+                    "HTTP error sending CheckFailure response "
+                    "(command=%r, user=%s): %s", cmd_name, user_id, exc
+                )
         return
+
     if isinstance(error, app_commands.CommandInvokeError):
         original = error.original
         if isinstance(original, discord.NotFound) and original.code == 10062:
-            # Interaction token expired before the bot could respond – silently ignore.
+            log.warning(
+                "Interaction token expired (10062) – command=%r, user=%s",
+                cmd_name, user_id,
+            )
             return
-    print(f"Command Error: {error}")
+
+    log.exception(
+        "Unhandled app command error (command=%r, user=%s): %s",
+        cmd_name, user_id, error,
+    )
 
 
 # ── Lifecycle events ───────────────────────────────────────────────────────────
@@ -58,8 +100,11 @@ async def on_ready():
         monthly_reset_scheduler.start()
     if not message_cleanup_scheduler.is_running():
         message_cleanup_scheduler.start()
-    await bot.tree.sync(guild=guild_obj)
-    print(f"Logged in as {bot.user}")
+    try:
+        await bot.tree.sync(guild=guild_obj)
+    except Exception as exc:
+        log.exception("Failed to sync command tree")
+    log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
 
 
 # ── Run ────────────────────────────────────────────────────────────────────────

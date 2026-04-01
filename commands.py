@@ -2,6 +2,8 @@
 Slash commands for match management.
 """
 
+import logging
+
 import discord
 from discord import app_commands
 from discord.ext import commands as ext_commands
@@ -10,7 +12,25 @@ from typing import Optional
 from config import GUILD_ID, REGISTER_CHANNEL_ID
 from views import MapNamesModal
 
+log = logging.getLogger(__name__)
 guild_obj = discord.Object(id=GUILD_ID)
+
+
+def _is_interaction_expired(exc: discord.NotFound) -> bool:
+    return exc.code == 10062
+
+
+async def _safe_send(interaction: discord.Interaction, context: str, *args, **kwargs) -> None:
+    """Send an interaction response, logging timeout/HTTP errors instead of propagating."""
+    try:
+        await interaction.response.send_message(*args, **kwargs)
+    except discord.NotFound as exc:
+        if _is_interaction_expired(exc):
+            log.warning("Interaction expired (%s, user=%s)", context, interaction.user.id)
+        else:
+            log.error("NotFound sending response (%s, user=%s): %s", context, interaction.user.id, exc)
+    except discord.HTTPException as exc:
+        log.error("HTTP error sending response (%s, user=%s): %s", context, interaction.user.id, exc)
 
 
 def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
@@ -37,15 +57,21 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         """Open registration for a new FFA match."""
 
         if count_fight < 1 or count_fight > 5:
-            await interaction.response.send_message(
-                "❌ Số trận đánh phải từ 1 đến 5.", ephemeral=True
+            await _safe_send(
+                interaction, "open_registration",
+                "❌ Số trận đánh phải từ 1 đến 5.", ephemeral=True,
             )
             return
 
         register_channel = interaction.client.get_channel(REGISTER_CHANNEL_ID)
         if register_channel is None:
-            await interaction.response.send_message(
-                "❌ Không tìm thấy kênh đăng ký. Vui lòng kiểm tra cấu hình.", ephemeral=True
+            log.error(
+                "open_registration: register channel %s not found (user=%s)",
+                REGISTER_CHANNEL_ID, interaction.user.id,
+            )
+            await _safe_send(
+                interaction, "open_registration",
+                "❌ Không tìm thấy kênh đăng ký. Vui lòng kiểm tra cấu hình.", ephemeral=True,
             )
             return
 
@@ -57,7 +83,24 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             db_session_factory=db_session_factory,
             register_channel=register_channel,
         )
-        await interaction.response.send_modal(modal)
+        try:
+            await interaction.response.send_modal(modal)
+        except discord.NotFound as exc:
+            if _is_interaction_expired(exc):
+                log.warning(
+                    "Interaction expired sending open_registration modal (user=%s)",
+                    interaction.user.id,
+                )
+            else:
+                log.error(
+                    "NotFound sending open_registration modal (user=%s): %s",
+                    interaction.user.id, exc,
+                )
+        except discord.HTTPException as exc:
+            log.error(
+                "HTTP error sending open_registration modal (user=%s): %s",
+                interaction.user.id, exc,
+            )
 
     @bot.tree.command(
         name="set_ingame_name",
@@ -85,35 +128,44 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
 
         # Non-admins must not be able to set an explicit ELO value.
         if elo is not None and not is_admin:
-            await interaction.response.send_message(
-                "❌ Chỉ admin mới có thể đặt ELO.", ephemeral=True
+            await _safe_send(
+                interaction, "set_ingame_name",
+                "❌ Chỉ admin mới có thể đặt ELO.", ephemeral=True,
             )
             return
 
-        with db_session_factory() as session:
-            user = session.get(User, user_id)
-            if user is None:
-                initial_elo = elo if elo is not None else 1000
-                user = User(id=user_id, ingame_name=name, elo=initial_elo)
-                session.add(user)
-                msg = (
-                    f"✅ Đã tạo hồ sơ: tên in-game **{name}**, ELO **{initial_elo}**."
-                )
-            else:
-                user.ingame_name = name
-                if elo is not None:
-                    delta = elo - user.elo
-                    user.elo = elo
-                    user.last_elo_change = delta
-                    if delta > 0:
-                        user.monthly_elo_gain = (user.monthly_elo_gain or 0) + delta
-                msg = f"✅ Đã cập nhật tên in-game: **{name}**"
-                if elo is not None:
-                    msg += f", ELO: **{elo}**"
-                msg += "."
-            session.commit()
+        try:
+            with db_session_factory() as session:
+                user = session.get(User, user_id)
+                if user is None:
+                    initial_elo = elo if elo is not None else 1000
+                    user = User(id=user_id, ingame_name=name, elo=initial_elo)
+                    session.add(user)
+                    msg = (
+                        f"✅ Đã tạo hồ sơ: tên in-game **{name}**, ELO **{initial_elo}**."
+                    )
+                else:
+                    user.ingame_name = name
+                    if elo is not None:
+                        delta = elo - user.elo
+                        user.elo = elo
+                        user.last_elo_change = delta
+                        if delta > 0:
+                            user.monthly_elo_gain = (user.monthly_elo_gain or 0) + delta
+                    msg = f"✅ Đã cập nhật tên in-game: **{name}**"
+                    if elo is not None:
+                        msg += f", ELO: **{elo}**"
+                    msg += "."
+                session.commit()
+        except Exception as exc:
+            log.exception("DB error in set_ingame_name (user=%s)", user_id)
+            await _safe_send(
+                interaction, "set_ingame_name",
+                "❌ Đã xảy ra lỗi nội bộ khi lưu dữ liệu.", ephemeral=True,
+            )
+            return
 
-        await interaction.response.send_message(msg, ephemeral=True)
+        await _safe_send(interaction, "set_ingame_name", msg, ephemeral=True)
 
     # ── Admin: add ticket ──────────────────────────────────────────────────────
 
@@ -133,25 +185,39 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         from entity import User
 
         if amount <= 0:
-            await interaction.response.send_message(
-                "❌ Số vé phải lớn hơn 0.", ephemeral=True
+            await _safe_send(
+                interaction, "add_ticket",
+                "❌ Số vé phải lớn hơn 0.", ephemeral=True,
             )
             return
 
-        with db_session_factory() as session:
-            user = session.get(User, player.id)
-            if user is None:
-                await interaction.response.send_message(
-                    f"❌ Người chơi {player.mention} chưa có hồ sơ. "
-                    "Hãy yêu cầu họ dùng `/set_ingame_name` trước.",
-                    ephemeral=True,
-                )
-                return
-            user.ticket += amount
-            new_total = user.ticket
-            session.commit()
+        try:
+            with db_session_factory() as session:
+                user = session.get(User, player.id)
+                if user is None:
+                    await _safe_send(
+                        interaction, "add_ticket",
+                        f"❌ Người chơi {player.mention} chưa có hồ sơ. "
+                        "Hãy yêu cầu họ dùng `/set_ingame_name` trước.",
+                        ephemeral=True,
+                    )
+                    return
+                user.ticket += amount
+                new_total = user.ticket
+                session.commit()
+        except Exception as exc:
+            log.exception(
+                "DB error in add_ticket (admin=%s, player=%s)",
+                interaction.user.id, player.id,
+            )
+            await _safe_send(
+                interaction, "add_ticket",
+                "❌ Đã xảy ra lỗi nội bộ khi lưu dữ liệu.", ephemeral=True,
+            )
+            return
 
-        await interaction.response.send_message(
+        await _safe_send(
+            interaction, "add_ticket",
             f"✅ Đã thêm **{amount}** vé cho {player.mention}. "
             f"Tổng vé hiện tại: **{new_total}**.",
             ephemeral=True,
@@ -175,31 +241,46 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         from entity import User
 
         if amount <= 0:
-            await interaction.response.send_message(
-                "❌ Số vé phải lớn hơn 0.", ephemeral=True
+            await _safe_send(
+                interaction, "remove_ticket",
+                "❌ Số vé phải lớn hơn 0.", ephemeral=True,
             )
             return
 
-        with db_session_factory() as session:
-            user = session.get(User, player.id)
-            if user is None:
-                await interaction.response.send_message(
-                    f"❌ Người chơi {player.mention} chưa có hồ sơ.",
-                    ephemeral=True,
-                )
-                return
-            if user.ticket < amount:
-                await interaction.response.send_message(
-                    f"❌ {player.mention} chỉ có **{user.ticket}** vé, "
-                    f"không đủ để xóa **{amount}** vé.",
-                    ephemeral=True,
-                )
-                return
-            user.ticket -= amount
-            new_total = user.ticket
-            session.commit()
+        try:
+            with db_session_factory() as session:
+                user = session.get(User, player.id)
+                if user is None:
+                    await _safe_send(
+                        interaction, "remove_ticket",
+                        f"❌ Người chơi {player.mention} chưa có hồ sơ.",
+                        ephemeral=True,
+                    )
+                    return
+                if user.ticket < amount:
+                    await _safe_send(
+                        interaction, "remove_ticket",
+                        f"❌ {player.mention} chỉ có **{user.ticket}** vé, "
+                        f"không đủ để xóa **{amount}** vé.",
+                        ephemeral=True,
+                    )
+                    return
+                user.ticket -= amount
+                new_total = user.ticket
+                session.commit()
+        except Exception as exc:
+            log.exception(
+                "DB error in remove_ticket (admin=%s, player=%s)",
+                interaction.user.id, player.id,
+            )
+            await _safe_send(
+                interaction, "remove_ticket",
+                "❌ Đã xảy ra lỗi nội bộ khi lưu dữ liệu.", ephemeral=True,
+            )
+            return
 
-        await interaction.response.send_message(
+        await _safe_send(
+            interaction, "remove_ticket",
             f"✅ Đã xóa **{amount}** vé của {player.mention}. "
             f"Tổng vé còn lại: **{new_total}**.",
             ephemeral=True,
@@ -221,11 +302,23 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         from entity import User
         from helpers import get_rank
 
-        with db_session_factory() as session:
-            user = session.get(User, player.id)
+        try:
+            with db_session_factory() as session:
+                user = session.get(User, player.id)
+        except Exception as exc:
+            log.exception(
+                "DB error in view_ffa (requester=%s, player=%s)",
+                interaction.user.id, player.id,
+            )
+            await _safe_send(
+                interaction, "view_ffa",
+                "❌ Đã xảy ra lỗi nội bộ khi truy vấn dữ liệu.", ephemeral=True,
+            )
+            return
 
         if user is None:
-            await interaction.response.send_message(
+            await _safe_send(
+                interaction, "view_ffa",
                 f"❌ {player.mention} chưa có hồ sơ FFA. "
                 "Hãy yêu cầu họ dùng `/set_ingame_name` trước.",
                 ephemeral=True,
@@ -264,4 +357,21 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         )
         embed.set_footer(text=f"Discord ID: {player.id}")
 
-        await interaction.response.send_message(embed=embed)
+        try:
+            await interaction.response.send_message(embed=embed)
+        except discord.NotFound as exc:
+            if exc.code == 10062:
+                log.warning(
+                    "Interaction expired for view_ffa (requester=%s, player=%s)",
+                    interaction.user.id, player.id,
+                )
+            else:
+                log.error(
+                    "NotFound sending view_ffa embed (requester=%s, player=%s): %s",
+                    interaction.user.id, player.id, exc,
+                )
+        except discord.HTTPException as exc:
+            log.error(
+                "HTTP error sending view_ffa embed (requester=%s, player=%s): %s",
+                interaction.user.id, player.id, exc,
+            )

@@ -4,6 +4,7 @@ Discord UI components (Views and Modals) for the FFA bot.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,37 @@ from helpers import format_vn_time, parse_duration
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
+
+log = logging.getLogger(__name__)
+
+
+# ── Interaction response helpers ───────────────────────────────────────────────
+
+
+async def _safe_edit(interaction: discord.Interaction, context: str, **kwargs) -> None:
+    """Edit the original interaction message, logging timeout/HTTP errors."""
+    try:
+        await interaction.response.edit_message(**kwargs)
+    except discord.NotFound as exc:
+        if exc.code == 10062:
+            log.warning("Interaction expired (%s, user=%s)", context, interaction.user.id)
+        else:
+            log.error("NotFound editing message (%s, user=%s): %s", context, interaction.user.id, exc)
+    except discord.HTTPException as exc:
+        log.error("HTTP error editing message (%s, user=%s): %s", context, interaction.user.id, exc)
+
+
+async def _safe_send(interaction: discord.Interaction, context: str, *args, **kwargs) -> None:
+    """Send an ephemeral interaction response, logging timeout/HTTP errors."""
+    try:
+        await interaction.response.send_message(*args, **kwargs)
+    except discord.NotFound as exc:
+        if exc.code == 10062:
+            log.warning("Interaction expired (%s, user=%s)", context, interaction.user.id)
+        else:
+            log.error("NotFound sending response (%s, user=%s): %s", context, interaction.user.id, exc)
+    except discord.HTTPException as exc:
+        log.error("HTTP error sending response (%s, user=%s): %s", context, interaction.user.id, exc)
 
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
@@ -163,7 +195,8 @@ class MapNamesModal(discord.ui.Modal):
         try:
             time_start_dt = datetime.strptime(self.time_start, "%Y-%m-%d %H:%M")
         except ValueError:
-            await interaction.response.send_message(
+            await _safe_send(
+                interaction, "MapNamesModal.on_submit",
                 "❌ Định dạng thời gian không hợp lệ. Vui lòng dùng: YYYY-MM-DD HH:MM",
                 ephemeral=True,
             )
@@ -173,7 +206,8 @@ class MapNamesModal(discord.ui.Modal):
         try:
             parse_duration(self.time_reach_checkin)
         except ValueError:
-            await interaction.response.send_message(
+            await _safe_send(
+                interaction, "MapNamesModal.on_submit",
                 f"❌ Định dạng thời gian check-in không hợp lệ: {self.time_reach_checkin!r}. "
                 "Vui lòng dùng: 1h hoặc 30p",
                 ephemeral=True,
@@ -183,7 +217,8 @@ class MapNamesModal(discord.ui.Modal):
         try:
             parse_duration(self.time_reach_divide_lobby)
         except ValueError:
-            await interaction.response.send_message(
+            await _safe_send(
+                interaction, "MapNamesModal.on_submit",
                 f"❌ Định dạng thời gian chia lobby không hợp lệ: {self.time_reach_divide_lobby!r}. "
                 "Vui lòng dùng: 1h hoặc 30p",
                 ephemeral=True,
@@ -191,35 +226,73 @@ class MapNamesModal(discord.ui.Modal):
             return
 
         # Save the match to the database and build the initial embed (no registrations yet)
-        with self.db_session_factory() as session:
-            match = Match(
-                register_users_id=[],
-                checkin_users_id=[],
-                name_maps=map_names,
-                count_fight=self.count_fight,
-                time_start=time_start_dt,
-                time_reach_checkin=self.time_reach_checkin,
-                time_reach_divide_lobby=self.time_reach_divide_lobby,
+        try:
+            with self.db_session_factory() as session:
+                match = Match(
+                    register_users_id=[],
+                    checkin_users_id=[],
+                    name_maps=map_names,
+                    count_fight=self.count_fight,
+                    time_start=time_start_dt,
+                    time_reach_checkin=self.time_reach_checkin,
+                    time_reach_divide_lobby=self.time_reach_divide_lobby,
+                )
+                session.add(match)
+                session.commit()
+                session.refresh(match)
+                match_id = match.id
+                embed = build_registration_embed(match, {})
+        except Exception as exc:
+            log.exception(
+                "DB error creating match in MapNamesModal.on_submit (user=%s)",
+                interaction.user.id,
             )
-            session.add(match)
-            session.commit()
-            session.refresh(match)
-            match_id = match.id
-            embed = build_registration_embed(match, {})
+            await _safe_send(
+                interaction, "MapNamesModal.on_submit",
+                "❌ Đã xảy ra lỗi nội bộ khi tạo match.", ephemeral=True,
+            )
+            return
 
         view = RegistrationView(match_id=match_id, db_session_factory=self.db_session_factory)
-        reg_msg = await self.register_channel.send(embed=embed, view=view)
+        try:
+            reg_msg = await self.register_channel.send(embed=embed, view=view)
+        except discord.HTTPException as exc:
+            log.exception(
+                "Failed to send registration message for match #%s (user=%s)",
+                match_id, interaction.user.id,
+            )
+            await _safe_send(
+                interaction, "MapNamesModal.on_submit",
+                "❌ Không thể gửi thông báo đăng ký. Vui lòng thử lại.", ephemeral=True,
+            )
+            return
 
         # Persist the registration message ID so the scheduler can disable it later
-        with self.db_session_factory() as session:
-            db_match = session.get(Match, match_id)
-            if db_match is not None:
-                db_match.register_message_id = reg_msg.id
-                session.commit()
+        try:
+            with self.db_session_factory() as session:
+                db_match = session.get(Match, match_id)
+                if db_match is not None:
+                    db_match.register_message_id = reg_msg.id
+                    session.commit()
+        except Exception as exc:
+            log.exception(
+                "DB error saving register_message_id for match #%s", match_id
+            )
 
-        await interaction.response.send_message(
-            f"✅ Đã mở đăng ký cho match #{match_id}!", ephemeral=True
+        await _safe_send(
+            interaction, "MapNamesModal.on_submit",
+            f"✅ Đã mở đăng ký cho match #{match_id}!", ephemeral=True,
         )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log.exception(
+            "Unhandled error in MapNamesModal (user=%s)", interaction.user.id
+        )
+        if not interaction.response.is_done():
+            await _safe_send(
+                interaction, "MapNamesModal.on_error",
+                "❌ Đã xảy ra lỗi không mong muốn.", ephemeral=True,
+            )
 
 
 # ── View: registration embed with Join / Cancel buttons ───────────────────────
@@ -244,38 +317,58 @@ class RegistrationView(discord.ui.View):
 
         user_id = interaction.user.id
 
-        with self.db_session_factory() as session:
-            # Ensure the player has set up their profile first
-            player = session.get(User, user_id)
-            if player is None:
-                await interaction.response.send_message(
-                    "❌ Bạn chưa có hồ sơ FFA. Vui lòng dùng `/set_ingame_name` trước khi đăng ký.",
-                    ephemeral=True,
+        try:
+            with self.db_session_factory() as session:
+                # Ensure the player has set up their profile first
+                player = session.get(User, user_id)
+                if player is None:
+                    await _safe_send(
+                        interaction, f"RegistrationView.join match={self.match_id}",
+                        "❌ Bạn chưa có hồ sơ FFA. Vui lòng dùng `/set_ingame_name` trước khi đăng ký.",
+                        ephemeral=True,
+                    )
+                    return
+
+                match: Match | None = session.get(Match, self.match_id)
+                if match is None:
+                    await _safe_send(
+                        interaction, f"RegistrationView.join match={self.match_id}",
+                        "❌ Match không tồn tại.", ephemeral=True,
+                    )
+                    return
+
+                registered: list = (match.register_users_id or []).copy()
+                if user_id in registered:
+                    await _safe_send(
+                        interaction, f"RegistrationView.join match={self.match_id}",
+                        "⚠️ Bạn đã đăng ký rồi!", ephemeral=True,
+                    )
+                    return
+
+                registered.append(user_id)
+                match.register_users_id = registered
+                session.commit()
+                session.refresh(match)
+
+                p_map = _load_player_map(session, registered)
+                new_embed = build_registration_embed(match, p_map)
+        except Exception as exc:
+            log.exception(
+                "Error in RegistrationView.join (match=%s, user=%s)",
+                self.match_id, user_id,
+            )
+            if not interaction.response.is_done():
+                await _safe_send(
+                    interaction, f"RegistrationView.join match={self.match_id}",
+                    "❌ Đã xảy ra lỗi nội bộ.", ephemeral=True,
                 )
-                return
-
-            match: Match | None = session.get(Match, self.match_id)
-            if match is None:
-                await interaction.response.send_message("❌ Match không tồn tại.", ephemeral=True)
-                return
-
-            registered: list = (match.register_users_id or []).copy()
-            if user_id in registered:
-                await interaction.response.send_message(
-                    "⚠️ Bạn đã đăng ký rồi!", ephemeral=True
-                )
-                return
-
-            registered.append(user_id)
-            match.register_users_id = registered
-            session.commit()
-            session.refresh(match)
-
-            p_map = _load_player_map(session, registered)
-            new_embed = build_registration_embed(match, p_map)
+            return
 
         # Edit the embed in-place; the updated list is the confirmation
-        await interaction.response.edit_message(embed=new_embed, view=self)
+        await _safe_edit(
+            interaction, f"RegistrationView.join match={self.match_id}",
+            embed=new_embed, view=self,
+        )
 
     @discord.ui.button(label="Hủy đăng ký", style=discord.ButtonStyle.danger, emoji="❌")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -283,28 +376,47 @@ class RegistrationView(discord.ui.View):
 
         user_id = interaction.user.id
 
-        with self.db_session_factory() as session:
-            match: Match | None = session.get(Match, self.match_id)
-            if match is None:
-                await interaction.response.send_message("❌ Match không tồn tại.", ephemeral=True)
-                return
+        try:
+            with self.db_session_factory() as session:
+                match: Match | None = session.get(Match, self.match_id)
+                if match is None:
+                    await _safe_send(
+                        interaction, f"RegistrationView.cancel match={self.match_id}",
+                        "❌ Match không tồn tại.", ephemeral=True,
+                    )
+                    return
 
-            registered: list = (match.register_users_id or []).copy()
-            if user_id not in registered:
-                await interaction.response.send_message(
-                    "⚠️ Bạn chưa đăng ký!", ephemeral=True
+                registered: list = (match.register_users_id or []).copy()
+                if user_id not in registered:
+                    await _safe_send(
+                        interaction, f"RegistrationView.cancel match={self.match_id}",
+                        "⚠️ Bạn chưa đăng ký!", ephemeral=True,
+                    )
+                    return
+
+                registered.remove(user_id)
+                match.register_users_id = registered
+                session.commit()
+                session.refresh(match)
+
+                p_map = _load_player_map(session, registered)
+                new_embed = build_registration_embed(match, p_map)
+        except Exception as exc:
+            log.exception(
+                "Error in RegistrationView.cancel (match=%s, user=%s)",
+                self.match_id, user_id,
+            )
+            if not interaction.response.is_done():
+                await _safe_send(
+                    interaction, f"RegistrationView.cancel match={self.match_id}",
+                    "❌ Đã xảy ra lỗi nội bộ.", ephemeral=True,
                 )
-                return
+            return
 
-            registered.remove(user_id)
-            match.register_users_id = registered
-            session.commit()
-            session.refresh(match)
-
-            p_map = _load_player_map(session, registered)
-            new_embed = build_registration_embed(match, p_map)
-
-        await interaction.response.edit_message(embed=new_embed, view=self)
+        await _safe_edit(
+            interaction, f"RegistrationView.cancel match={self.match_id}",
+            embed=new_embed, view=self,
+        )
 
 
 # ── View: check-in embed with Ready button ────────────────────────────────────
@@ -328,46 +440,67 @@ class CheckInView(discord.ui.View):
 
         user_id = interaction.user.id
 
-        with self.db_session_factory() as session:
-            # Ensure the player has set up their profile first
-            player = session.get(User, user_id)
-            if player is None:
-                await interaction.response.send_message(
-                    "❌ Bạn chưa có hồ sơ FFA. Vui lòng dùng `/set_ingame_name` trước khi check-in.",
-                    ephemeral=True,
+        try:
+            with self.db_session_factory() as session:
+                # Ensure the player has set up their profile first
+                player = session.get(User, user_id)
+                if player is None:
+                    await _safe_send(
+                        interaction, f"CheckInView.ready match={self.match_id}",
+                        "❌ Bạn chưa có hồ sơ FFA. Vui lòng dùng `/set_ingame_name` trước khi check-in.",
+                        ephemeral=True,
+                    )
+                    return
+
+                match: Match | None = session.get(Match, self.match_id)
+                if match is None:
+                    await _safe_send(
+                        interaction, f"CheckInView.ready match={self.match_id}",
+                        "❌ Match không tồn tại.", ephemeral=True,
+                    )
+                    return
+
+                registered: list = match.register_users_id or []
+                if user_id not in registered:
+                    await _safe_send(
+                        interaction, f"CheckInView.ready match={self.match_id}",
+                        "⚠️ Bạn chưa đăng ký tham gia match này!", ephemeral=True,
+                    )
+                    return
+
+                checked_in: list = (match.checkin_users_id or []).copy()
+                if user_id in checked_in:
+                    await _safe_send(
+                        interaction, f"CheckInView.ready match={self.match_id}",
+                        "⚠️ Bạn đã check-in rồi!", ephemeral=True,
+                    )
+                    return
+
+                checked_in.append(user_id)
+                match.checkin_users_id = checked_in
+                session.commit()
+                session.refresh(match)
+
+                # Load names for everyone relevant to the embed
+                all_user_ids = list(set((match.register_users_id or []) + checked_in))
+                p_map = _load_player_map(session, all_user_ids)
+                new_embed = build_checkin_embed(match, p_map)
+        except Exception as exc:
+            log.exception(
+                "Error in CheckInView.ready (match=%s, user=%s)",
+                self.match_id, user_id,
+            )
+            if not interaction.response.is_done():
+                await _safe_send(
+                    interaction, f"CheckInView.ready match={self.match_id}",
+                    "❌ Đã xảy ra lỗi nội bộ.", ephemeral=True,
                 )
-                return
+            return
 
-            match: Match | None = session.get(Match, self.match_id)
-            if match is None:
-                await interaction.response.send_message("❌ Match không tồn tại.", ephemeral=True)
-                return
-
-            registered: list = match.register_users_id or []
-            if user_id not in registered:
-                await interaction.response.send_message(
-                    "⚠️ Bạn chưa đăng ký tham gia match này!", ephemeral=True
-                )
-                return
-
-            checked_in: list = (match.checkin_users_id or []).copy()
-            if user_id in checked_in:
-                await interaction.response.send_message(
-                    "⚠️ Bạn đã check-in rồi!", ephemeral=True
-                )
-                return
-
-            checked_in.append(user_id)
-            match.checkin_users_id = checked_in
-            session.commit()
-            session.refresh(match)
-
-            # Load names for everyone relevant to the embed
-            all_user_ids = list(set((match.register_users_id or []) + checked_in))
-            p_map = _load_player_map(session, all_user_ids)
-            new_embed = build_checkin_embed(match, p_map)
-
-        await interaction.response.edit_message(embed=new_embed, view=self)
+        await _safe_edit(
+            interaction, f"CheckInView.ready match={self.match_id}",
+            embed=new_embed, view=self,
+        )
 
 
 # ── Result-entry embed builder ────────────────────────────────────────────────
@@ -512,7 +645,24 @@ class ScoreModal(discord.ui.Modal):
                 result_message_id=self.result_message_id,
                 result_channel_id=self.result_channel_id,
             )
-            await interaction.response.send_modal(modal2)
+            try:
+                await interaction.response.send_modal(modal2)
+            except discord.NotFound as exc:
+                if exc.code == 10062:
+                    log.warning(
+                        "Interaction expired chaining ScoreModal page 2 (lobby=%s, fight=%s, user=%s)",
+                        self.lobby_id, self.fight_idx, interaction.user.id,
+                    )
+                else:
+                    log.error(
+                        "NotFound chaining ScoreModal page 2 (lobby=%s, fight=%s, user=%s): %s",
+                        self.lobby_id, self.fight_idx, interaction.user.id, exc,
+                    )
+            except discord.HTTPException as exc:
+                log.error(
+                    "HTTP error chaining ScoreModal page 2 (lobby=%s, fight=%s, user=%s): %s",
+                    self.lobby_id, self.fight_idx, interaction.user.id, exc,
+                )
             return
 
         # Final page – save all scores
@@ -523,24 +673,37 @@ class ScoreModal(discord.ui.Modal):
         lobby_num = 0
         match_id = 0
 
-        with self.db_session_factory() as session:
-            lobby = session.get(Lobby, self.lobby_id)
-            if lobby is None:
-                await interaction.response.send_message(
-                    "❌ Lobby không tồn tại.", ephemeral=True
-                )
-                return
+        try:
+            with self.db_session_factory() as session:
+                lobby = session.get(Lobby, self.lobby_id)
+                if lobby is None:
+                    await _safe_send(
+                        interaction, f"ScoreModal.on_submit lobby={self.lobby_id}",
+                        "❌ Lobby không tồn tại.", ephemeral=True,
+                    )
+                    return
 
-            existing_scores = dict(lobby.scores or {})
-            existing_scores[fight_key] = all_scores
-            lobby.scores = existing_scores
-            session.commit()
+                existing_scores = dict(lobby.scores or {})
+                existing_scores[fight_key] = all_scores
+                lobby.scores = existing_scores
+                session.commit()
 
-            tier = lobby.tier or ""
-            lobby_num = lobby.lobby_number or 0
-            match_id = lobby.match_id
+                tier = lobby.tier or ""
+                lobby_num = lobby.lobby_number or 0
+                match_id = lobby.match_id
+        except Exception as exc:
+            log.exception(
+                "DB error saving scores in ScoreModal (lobby=%s, fight=%s, user=%s)",
+                self.lobby_id, self.fight_idx, interaction.user.id,
+            )
+            await _safe_send(
+                interaction, f"ScoreModal.on_submit lobby={self.lobby_id}",
+                "❌ Đã xảy ra lỗi nội bộ khi lưu kết quả.", ephemeral=True,
+            )
+            return
 
-        await interaction.response.send_message(
+        await _safe_send(
+            interaction, f"ScoreModal.on_submit lobby={self.lobby_id}",
             f"✅ Đã lưu kết quả Trận {self.fight_idx} "
             f"cho Lobby {tier} #{lobby_num}!",
             ephemeral=True,
@@ -560,8 +723,33 @@ class ScoreModal(discord.ui.Modal):
                             new_embed = build_lobby_result_embed(lobby, match)
                     if new_embed:
                         await msg.edit(embed=new_embed)
-                except (discord.NotFound, discord.HTTPException):
-                    pass
+                except discord.NotFound as exc:
+                    log.warning(
+                        "Result message not found when updating scores "
+                        "(lobby=%s, msg=%s): %s",
+                        self.lobby_id, self.result_message_id, exc,
+                    )
+                except discord.HTTPException as exc:
+                    log.error(
+                        "HTTP error updating result embed (lobby=%s, msg=%s): %s",
+                        self.lobby_id, self.result_message_id, exc,
+                    )
+                except Exception as exc:
+                    log.exception(
+                        "Unexpected error updating result embed (lobby=%s)",
+                        self.lobby_id,
+                    )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log.exception(
+            "Unhandled error in ScoreModal (lobby=%s, fight=%s, user=%s)",
+            self.lobby_id, self.fight_idx, interaction.user.id,
+        )
+        if not interaction.response.is_done():
+            await _safe_send(
+                interaction, f"ScoreModal.on_error lobby={self.lobby_id}",
+                "❌ Đã xảy ra lỗi không mong muốn.", ephemeral=True,
+            )
 
 
 # ── Result view (fight buttons + cancel + finalize) ───────────────────────────
@@ -629,8 +817,9 @@ class LobbyResultView(discord.ui.View):
 
     async def _check_admin(self, interaction: discord.Interaction) -> bool:
         if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(
-                "❌ Chỉ admin mới có thể sử dụng chức năng này.", ephemeral=True
+            await _safe_send(
+                interaction, f"LobbyResultView._check_admin lobby={self.lobby_id}",
+                "❌ Chỉ admin mới có thể sử dụng chức năng này.", ephemeral=True,
             )
             return False
         return True
@@ -644,27 +833,41 @@ class LobbyResultView(discord.ui.View):
         from entity import Lobby, User
         from config import RESULT_CHANNEL_ID
 
-        with self.db_session_factory() as session:
-            lobby = session.get(Lobby, self.lobby_id)
-            if lobby is None:
-                await interaction.response.send_message(
-                    "❌ Lobby không tồn tại.", ephemeral=True
-                )
-                return
-            if lobby.status != "active":
-                await interaction.response.send_message(
-                    f"⚠️ Lobby này đã ở trạng thái **{lobby.status}**.", ephemeral=True
-                )
-                return
+        try:
+            with self.db_session_factory() as session:
+                lobby = session.get(Lobby, self.lobby_id)
+                if lobby is None:
+                    await _safe_send(
+                        interaction, f"LobbyResultView._open_score_modal lobby={self.lobby_id}",
+                        "❌ Lobby không tồn tại.", ephemeral=True,
+                    )
+                    return
+                if lobby.status != "active":
+                    await _safe_send(
+                        interaction, f"LobbyResultView._open_score_modal lobby={self.lobby_id}",
+                        f"⚠️ Lobby này đã ở trạng thái **{lobby.status}**.", ephemeral=True,
+                    )
+                    return
 
-            users_list: list = lobby.users_list or []
-            result_msg_id = lobby.result_message_id
-            users = (
-                session.query(User).filter(User.id.in_(users_list)).all()
-                if users_list
-                else []
+                users_list: list = lobby.users_list or []
+                result_msg_id = lobby.result_message_id
+                users = (
+                    session.query(User).filter(User.id.in_(users_list)).all()
+                    if users_list
+                    else []
+                )
+                p_map = {u.id: (u.ingame_name or f"User{u.id}") for u in users}
+        except Exception as exc:
+            log.exception(
+                "DB error in _open_score_modal (lobby=%s, fight=%s, user=%s)",
+                self.lobby_id, fight_idx, interaction.user.id,
             )
-            p_map = {u.id: (u.ingame_name or f"User{u.id}") for u in users}
+            if not interaction.response.is_done():
+                await _safe_send(
+                    interaction, f"LobbyResultView._open_score_modal lobby={self.lobby_id}",
+                    "❌ Đã xảy ra lỗi nội bộ.", ephemeral=True,
+                )
+            return
 
         # Build page entries: (str_key, display_label)
         entries: list[tuple[str, str]] = []
@@ -685,7 +888,24 @@ class LobbyResultView(discord.ui.View):
             result_message_id=result_msg_id,
             result_channel_id=RESULT_CHANNEL_ID,
         )
-        await interaction.response.send_modal(modal)
+        try:
+            await interaction.response.send_modal(modal)
+        except discord.NotFound as exc:
+            if exc.code == 10062:
+                log.warning(
+                    "Interaction expired opening ScoreModal (lobby=%s, fight=%s, user=%s)",
+                    self.lobby_id, fight_idx, interaction.user.id,
+                )
+            else:
+                log.error(
+                    "NotFound opening ScoreModal (lobby=%s, fight=%s, user=%s): %s",
+                    self.lobby_id, fight_idx, interaction.user.id, exc,
+                )
+        except discord.HTTPException as exc:
+            log.error(
+                "HTTP error opening ScoreModal (lobby=%s, fight=%s, user=%s): %s",
+                self.lobby_id, fight_idx, interaction.user.id, exc,
+            )
 
     async def _cancel_lobby(self, interaction: discord.Interaction) -> None:
         if not await self._check_admin(interaction):
@@ -694,44 +914,62 @@ class LobbyResultView(discord.ui.View):
         from entity import Lobby, Match
         from helpers import now_vn
 
-        with self.db_session_factory() as session:
-            lobby = session.get(Lobby, self.lobby_id)
-            if lobby is None:
-                await interaction.response.send_message(
-                    "❌ Lobby không tồn tại.", ephemeral=True
-                )
-                return
-            if lobby.status != "active":
-                await interaction.response.send_message(
-                    f"⚠️ Lobby đã ở trạng thái **{lobby.status}**.", ephemeral=True
-                )
-                return
+        try:
+            with self.db_session_factory() as session:
+                lobby = session.get(Lobby, self.lobby_id)
+                if lobby is None:
+                    await _safe_send(
+                        interaction, f"LobbyResultView._cancel_lobby lobby={self.lobby_id}",
+                        "❌ Lobby không tồn tại.", ephemeral=True,
+                    )
+                    return
+                if lobby.status != "active":
+                    await _safe_send(
+                        interaction, f"LobbyResultView._cancel_lobby lobby={self.lobby_id}",
+                        f"⚠️ Lobby đã ở trạng thái **{lobby.status}**.", ephemeral=True,
+                    )
+                    return
 
-            lobby.status = "cancelled"
-            session.commit()
-            match = session.get(Match, lobby.match_id)
-
-            # If all lobbies of this match are now in a terminal state, mark the
-            # match as ended so the message-cleanup scheduler can pick it up.
-            remaining_active = (
-                session.query(Lobby)
-                .filter(Lobby.match_id == lobby.match_id, Lobby.status == "active")
-                .count()
-            )
-            if remaining_active == 0 and match and match.end_time is None:
-                match.end_time = now_vn()
+                lobby.status = "cancelled"
                 session.commit()
+                match = session.get(Match, lobby.match_id)
 
-            new_embed = build_lobby_result_embed(lobby, match) if match else None
+                # If all lobbies of this match are now in a terminal state, mark the
+                # match as ended so the message-cleanup scheduler can pick it up.
+                remaining_active = (
+                    session.query(Lobby)
+                    .filter(Lobby.match_id == lobby.match_id, Lobby.status == "active")
+                    .count()
+                )
+                if remaining_active == 0 and match and match.end_time is None:
+                    match.end_time = now_vn()
+                    session.commit()
+
+                new_embed = build_lobby_result_embed(lobby, match) if match else None
+        except Exception as exc:
+            log.exception(
+                "DB error in _cancel_lobby (lobby=%s, user=%s)",
+                self.lobby_id, interaction.user.id,
+            )
+            if not interaction.response.is_done():
+                await _safe_send(
+                    interaction, f"LobbyResultView._cancel_lobby lobby={self.lobby_id}",
+                    "❌ Đã xảy ra lỗi nội bộ.", ephemeral=True,
+                )
+            return
 
         if new_embed:
             # Disable all buttons
             for item in self.children:
                 item.disabled = True
-            await interaction.response.edit_message(embed=new_embed, view=self)
+            await _safe_edit(
+                interaction, f"LobbyResultView._cancel_lobby lobby={self.lobby_id}",
+                embed=new_embed, view=self,
+            )
         else:
-            await interaction.response.send_message(
-                "✅ Lobby đã bị hủy.", ephemeral=True
+            await _safe_send(
+                interaction, f"LobbyResultView._cancel_lobby lobby={self.lobby_id}",
+                "✅ Lobby đã bị hủy.", ephemeral=True,
             )
 
     async def _finalize_lobby(self, interaction: discord.Interaction) -> None:
@@ -741,59 +979,78 @@ class LobbyResultView(discord.ui.View):
         from entity import Lobby, Match
         from helpers import now_vn
 
-        with self.db_session_factory() as session:
-            lobby = session.get(Lobby, self.lobby_id)
-            if lobby is None:
-                await interaction.response.send_message(
-                    "❌ Lobby không tồn tại.", ephemeral=True
-                )
-                return
-            if lobby.status != "active":
-                await interaction.response.send_message(
-                    f"⚠️ Lobby đã ở trạng thái **{lobby.status}**.", ephemeral=True
-                )
-                return
+        try:
+            with self.db_session_factory() as session:
+                lobby = session.get(Lobby, self.lobby_id)
+                if lobby is None:
+                    await _safe_send(
+                        interaction, f"LobbyResultView._finalize_lobby lobby={self.lobby_id}",
+                        "❌ Lobby không tồn tại.", ephemeral=True,
+                    )
+                    return
+                if lobby.status != "active":
+                    await _safe_send(
+                        interaction, f"LobbyResultView._finalize_lobby lobby={self.lobby_id}",
+                        f"⚠️ Lobby đã ở trạng thái **{lobby.status}**.", ephemeral=True,
+                    )
+                    return
 
-            # Verify all fights have scores entered
-            scores: dict = lobby.scores or {}
-            match = session.get(Match, lobby.match_id)
-            count_fight = match.count_fight if match else self.count_fight
+                # Verify all fights have scores entered
+                scores: dict = lobby.scores or {}
+                match = session.get(Match, lobby.match_id)
+                count_fight = match.count_fight if match else self.count_fight
 
-            missing_fights = [
-                i for i in range(1, count_fight + 1)
-                if not scores.get(f"fight_{i}")
-            ]
-            if missing_fights:
-                missing_str = ", ".join(f"Trận {i}" for i in missing_fights)
-                await interaction.response.send_message(
-                    f"⚠️ Chưa nhập kết quả cho: **{missing_str}**. "
-                    "Vui lòng nhập đủ trước khi chốt.",
-                    ephemeral=True,
-                )
-                return
+                missing_fights = [
+                    i for i in range(1, count_fight + 1)
+                    if not scores.get(f"fight_{i}")
+                ]
+                if missing_fights:
+                    missing_str = ", ".join(f"Trận {i}" for i in missing_fights)
+                    await _safe_send(
+                        interaction, f"LobbyResultView._finalize_lobby lobby={self.lobby_id}",
+                        f"⚠️ Chưa nhập kết quả cho: **{missing_str}**. "
+                        "Vui lòng nhập đủ trước khi chốt.",
+                        ephemeral=True,
+                    )
+                    return
 
-            lobby.status = "finished"
-            session.commit()
-
-            # If all lobbies of this match are now in a terminal state, mark the
-            # match as ended so the message-cleanup scheduler can pick it up.
-            remaining_active = (
-                session.query(Lobby)
-                .filter(Lobby.match_id == lobby.match_id, Lobby.status == "active")
-                .count()
-            )
-            if remaining_active == 0 and match and match.end_time is None:
-                match.end_time = now_vn()
+                lobby.status = "finished"
                 session.commit()
 
-            new_embed = build_lobby_result_embed(lobby, match) if match else None
+                # If all lobbies of this match are now in a terminal state, mark the
+                # match as ended so the message-cleanup scheduler can pick it up.
+                remaining_active = (
+                    session.query(Lobby)
+                    .filter(Lobby.match_id == lobby.match_id, Lobby.status == "active")
+                    .count()
+                )
+                if remaining_active == 0 and match and match.end_time is None:
+                    match.end_time = now_vn()
+                    session.commit()
+
+                new_embed = build_lobby_result_embed(lobby, match) if match else None
+        except Exception as exc:
+            log.exception(
+                "DB error in _finalize_lobby (lobby=%s, user=%s)",
+                self.lobby_id, interaction.user.id,
+            )
+            if not interaction.response.is_done():
+                await _safe_send(
+                    interaction, f"LobbyResultView._finalize_lobby lobby={self.lobby_id}",
+                    "❌ Đã xảy ra lỗi nội bộ.", ephemeral=True,
+                )
+            return
 
         if new_embed:
             for item in self.children:
                 item.disabled = True
-            await interaction.response.edit_message(embed=new_embed, view=self)
+            await _safe_edit(
+                interaction, f"LobbyResultView._finalize_lobby lobby={self.lobby_id}",
+                embed=new_embed, view=self,
+            )
         else:
-            await interaction.response.send_message(
-                "✅ Lobby đã được chốt kết quả.", ephemeral=True
+            await _safe_send(
+                interaction, f"LobbyResultView._finalize_lobby lobby={self.lobby_id}",
+                "✅ Lobby đã được chốt kết quả.", ephemeral=True,
             )
 
