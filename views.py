@@ -409,10 +409,11 @@ def build_lobby_result_embed(lobby, match) -> discord.Embed:
         map_name = map_names[i - 1] if i - 1 < len(map_names) else f"map{i}"
         fight_scores: dict = scores.get(fight_key, {})
         if fight_scores:
-            score_lines = "\n".join(
-                f"  • `{uid}`: **{score}**" for uid, score in fight_scores.items()
-            )
-            lines.append(f"⚔️ **Trận {i} ({map_name}):**\n{score_lines}")
+            score_lines = []
+            for uid, score in fight_scores.items():
+                mention = f"<@{uid}>" if uid.isdigit() else uid
+                score_lines.append(f"  • {mention}: **{score}**")
+            lines.append(f"⚔️ **Trận {i} ({map_name}):**\n" + "\n".join(score_lines))
         else:
             lines.append(f"⚔️ **Trận {i} ({map_name}):** _(chưa có kết quả)_")
 

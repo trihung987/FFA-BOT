@@ -14,6 +14,7 @@ Handles:
 
 from __future__ import annotations
 
+import logging
 import random
 from typing import TYPE_CHECKING
 
@@ -22,29 +23,32 @@ import discord
 if TYPE_CHECKING:
     from discord.ext import commands as ext_commands
 
+log = logging.getLogger(__name__)
+
 # ── Civilization pool ──────────────────────────────────────────────────────────
-# Each entry: (emoji_flag, display_name)
-CIVS: list[tuple[str, str]] = [
-    ("🏴󠁧󠁢󠁥󠁮󠁧󠁿", "Anh"),
-    ("🇫🇷", "Pháp"),
-    ("⚜️", "Đế chế La Mã"),
-    ("🐎", "Mông Cổ"),
-    ("❄️", "Rus"),
-    ("🐘", "Delhi"),
-    ("🌙", "Abbasid"),
-    ("🐉", "Trung Quốc"),
-    ("🦅", "Ottoman"),
-    ("🦁", "Malians"),
-    ("☦️", "Byzantines"),
-    ("⚔️", "Nhật Bản"),
-    ("🔰", "Order of the Dragon"),
-    ("🌹", "Ayyubids"),
-    ("📿", "Zhu Xi"),
-    ("🥀", "House of Lancaster"),
-    ("🕊️", "Jeanne d'Arc"),
-    ("✝️", "Knights Templar"),
-    ("🔱", "Hàn Quốc"),
-    ("🌊", "Vikings"),
+# Each entry is a Discord custom-emoji string, e.g. "<:civ_anh:1234567890>".
+# Leave as empty strings "" – admin fills in the actual emoji codes before deploy.
+CIVS: list[str] = [
+    "",  # civ 1
+    "",  # civ 2
+    "",  # civ 3
+    "",  # civ 4
+    "",  # civ 5
+    "",  # civ 6
+    "",  # civ 7
+    "",  # civ 8
+    "",  # civ 9
+    "",  # civ 10
+    "",  # civ 11
+    "",  # civ 12
+    "",  # civ 13
+    "",  # civ 14
+    "",  # civ 15
+    "",  # civ 16
+    "",  # civ 17
+    "",  # civ 18
+    "",  # civ 19
+    "",  # civ 20
 ]
 
 # ── Lobby tier constants ───────────────────────────────────────────────────────
@@ -70,8 +74,9 @@ MAX_AI_COUNT = MAX_LOBBY_SIZE - MIN_LOBBY_SIZE  # 2
 def assign_civs(all_keys: list[str], count_fight: int) -> dict[str, list[str]]:
     """Assign one unique civ per fight to each player/AI key.
 
-    Within a single fight no two entries share the same civ.
-    The same civ *may* appear for the same player across different fights.
+    Within a single fight no two entries share the same civ slot (sampled without
+    replacement from :data:`CIVS`).  The same civ *may* appear for the same
+    player across different fights.
 
     Parameters
     ----------
@@ -84,9 +89,14 @@ def assign_civs(all_keys: list[str], count_fight: int) -> dict[str, list[str]]:
     Returns
     -------
     dict[str, list[str]]
-        Mapping of key → list of civ strings, one per fight.
-        Each civ string is formatted as ``"emoji name"`` (e.g. ``"🇫🇷 Pháp"``).
+        Mapping of key → list of civ emoji strings, one per fight.
     """
+    if all(c == "" for c in CIVS):
+        log.warning(
+            "CIVS list contains only empty strings – fill in Discord custom emoji "
+            "codes in lobby_division.py before deploying."
+        )
+
     n = len(all_keys)
     if n > len(CIVS):
         raise ValueError(f"Not enough civs ({len(CIVS)}) for {n} players")
@@ -94,8 +104,8 @@ def assign_civs(all_keys: list[str], count_fight: int) -> dict[str, list[str]]:
     result: dict[str, list[str]] = {k: [] for k in all_keys}
     for _ in range(count_fight):
         picked = random.sample(CIVS, n)
-        for key, (emoji, name) in zip(all_keys, picked):
-            result[key].append(f"{emoji} {name}")
+        for key, civ in zip(all_keys, picked):
+            result[key].append(civ)
     return result
 
 
@@ -112,9 +122,9 @@ def build_lobby_display_embed(
 
         Lobby tier #N
         Người chơi | Tên in-game | Trận 1 | … | Trận N
-        @mention   | ingame_name | 🇫🇷 Pháp | … | 🐉 TQ
+        @mention   | ingame_name | <emoji_civ> | … | <emoji_civ>
         …
-        AI         | —           | 🌙 Abbasid | …
+        AI         | —           | <emoji_civ> | …
     """
     tier = lobby.tier
     emoji = TIER_EMOJI.get(tier, "🎮")
@@ -260,6 +270,13 @@ async def divide_lobbies(
 
     announce_channel = bot.get_channel(DIVIDE_LOBBY_CHANNEL_ID)
     result_channel = bot.get_channel(RESULT_CHANNEL_ID) if RESULT_CHANNEL_ID else None
+
+    # Guard: skip if lobbies have already been created for this match
+    # (prevents double-execution when the scheduler ticks twice within the same minute)
+    with db_session_factory() as session:
+        existing_count = session.query(Lobby).filter(Lobby.match_id == match.id).count()
+    if existing_count > 0:
+        return
 
     checkin_ids: list = match.checkin_users_id or []
     if not checkin_ids:
@@ -425,7 +442,9 @@ async def divide_lobbies(
         try:
             await coro
         except Exception as exc:
-            print(f"[lobby_division] Failed to send cancel announcement for match #{match.id}: {exc}")
+            log.exception(
+                "Failed to send cancel announcement for match #%s: %s", match.id, exc
+            )
 
     if not lobby_specs:
         if announce_channel:
@@ -508,7 +527,7 @@ async def divide_lobbies(
                         db_lobby.text_channel_ids = text_ids
                         session.commit()
             except Exception as exc:
-                print(f"[lobby_division] Channel creation error (lobby #{lobby_id}): {exc}")
+                log.exception("Channel creation error (lobby #%s): %s", lobby_id, exc)
 
         # Re-load lobby data for embeds
         with db_session_factory() as session:
