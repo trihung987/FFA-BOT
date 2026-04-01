@@ -692,6 +692,7 @@ class LobbyResultView(discord.ui.View):
             return
 
         from entity import Lobby, Match
+        from helpers import now_vn
 
         with self.db_session_factory() as session:
             lobby = session.get(Lobby, self.lobby_id)
@@ -709,6 +710,18 @@ class LobbyResultView(discord.ui.View):
             lobby.status = "cancelled"
             session.commit()
             match = session.get(Match, lobby.match_id)
+
+            # If all lobbies of this match are now in a terminal state, mark the
+            # match as ended so the message-cleanup scheduler can pick it up.
+            remaining_active = (
+                session.query(Lobby)
+                .filter(Lobby.match_id == lobby.match_id, Lobby.status == "active")
+                .count()
+            )
+            if remaining_active == 0 and match and match.end_time is None:
+                match.end_time = now_vn()
+                session.commit()
+
             new_embed = build_lobby_result_embed(lobby, match) if match else None
 
         if new_embed:
@@ -726,6 +739,7 @@ class LobbyResultView(discord.ui.View):
             return
 
         from entity import Lobby, Match
+        from helpers import now_vn
 
         with self.db_session_factory() as session:
             lobby = session.get(Lobby, self.lobby_id)
@@ -760,6 +774,18 @@ class LobbyResultView(discord.ui.View):
 
             lobby.status = "finished"
             session.commit()
+
+            # If all lobbies of this match are now in a terminal state, mark the
+            # match as ended so the message-cleanup scheduler can pick it up.
+            remaining_active = (
+                session.query(Lobby)
+                .filter(Lobby.match_id == lobby.match_id, Lobby.status == "active")
+                .count()
+            )
+            if remaining_active == 0 and match and match.end_time is None:
+                match.end_time = now_vn()
+                session.commit()
+
             new_embed = build_lobby_result_embed(lobby, match) if match else None
 
         if new_embed:
