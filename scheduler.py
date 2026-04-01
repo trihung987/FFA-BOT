@@ -4,12 +4,16 @@ Background task schedulers for check-in and lobby-division reminders.
 
 from __future__ import annotations
 
+import logging
+
 import discord
 from discord.ext import tasks, commands as ext_commands
 
 from config import CHECKIN_CHANNEL_ID, DIVIDE_LOBBY_CHANNEL_ID, REGISTER_CHANNEL_ID
 from entity import Match, User
 from helpers import now_vn, format_vn_time, parse_duration
+
+log = logging.getLogger(__name__)
 
 
 def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
@@ -82,7 +86,7 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                             db_match.checkin_message_id = checkin_msg.id
                             session.commit()
 
-            # --- Lobby-division reminder ---
+            # --- Lobby-division time ---
             try:
                 divide_delta = parse_duration(match.time_reach_divide_lobby)
             except ValueError:
@@ -92,8 +96,35 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 channel = bot.get_channel(DIVIDE_LOBBY_CHANNEL_ID)
                 if channel:
                     await channel.send(
-                        f"🔀 **Match #{match.id}** – Đã đến giờ chia lobby!"
+                        f"🔀 **Match #{match.id}** – Đã đến giờ chia lobby! "
+                        "Đang xử lý…"
                     )
+                # Run the full lobby-division pipeline
+                from lobby_division import divide_lobbies
+                import types
+
+                # Reload the match inside a fresh session so all check-ins are visible
+                snap = None
+                with db_session_factory() as session:
+                    fresh_match = session.get(Match, match.id)
+                    if fresh_match is not None:
+                        # Make a plain-namespace copy to avoid detached-instance issues
+                        snap = types.SimpleNamespace(
+                            id=fresh_match.id,
+                            checkin_users_id=list(fresh_match.checkin_users_id or []),
+                            count_fight=fresh_match.count_fight,
+                            name_maps=list(fresh_match.name_maps or []),
+                            time_start=fresh_match.time_start,
+                            time_reach_checkin=fresh_match.time_reach_checkin,
+                            time_reach_divide_lobby=fresh_match.time_reach_divide_lobby,
+                        )
+                if snap is not None:
+                    try:
+                        await divide_lobbies(bot, snap, db_session_factory)
+                    except Exception as exc:
+                        log.exception(
+                            "divide_lobbies error for match #%s: %s", match.id, exc
+                        )
 
     @tasks.loop(minutes=5)
     async def cleanup_scheduler() -> None:

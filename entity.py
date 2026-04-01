@@ -64,7 +64,23 @@ class Lobby(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     match_id = Column(Integer, nullable=False)
-    # JSON list of Discord user IDs assigned to this lobby
+    # Tier name: "Huyền Thoại", "Chinh Phạt", "Kim Cương", "Tân Binh"
+    tier = Column(String(50), nullable=False, server_default="")
+    # Sequential number within the same tier for this match
+    lobby_number = Column(Integer, nullable=False, server_default="1")
+    # JSON list of Discord user IDs (ints) assigned to this lobby
     users_list = Column(JSON, nullable=False, default=lambda: [])
-    # JSON dict: { "stage1": {"PlayerName": score, ...}, "stage2": {...}, ... }
+    # Number of AI slots added to fill the lobby up to 8
+    ai_count = Column(Integer, nullable=False, server_default="0")
+    # JSON dict: { str(user_id): [civ_fight1, civ_fight2, ...], "AI_1": [...] }
+    civs = Column(JSON, nullable=False, default=lambda: {})
+    # JSON dict: { "fight_1": { str(user_id): score, ... }, "fight_2": {...} }
     scores = Column(JSON, nullable=False, default=lambda: {})
+    # "active" | "cancelled" | "finished"
+    status = Column(String(20), nullable=False, server_default="active")
+    # JSON list of voice channel IDs (one per fight)
+    voice_channel_ids = Column(JSON, nullable=False, default=lambda: [])
+    # JSON list of text channel IDs (one per fight)
+    text_channel_ids = Column(JSON, nullable=False, default=lambda: [])
+    # Discord message ID of the result-entry embed in the result channel
+    result_message_id = Column(BigInteger, nullable=True)
