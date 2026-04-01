@@ -5,11 +5,12 @@ Background task schedulers for check-in and lobby-division reminders.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 
 import discord
 from discord.ext import tasks, commands as ext_commands
 
-from config import CHECKIN_CHANNEL_ID, DIVIDE_LOBBY_CHANNEL_ID, REGISTER_CHANNEL_ID
+from config import CHECKIN_CHANNEL_ID, DIVIDE_LOBBY_CHANNEL_ID, REGISTER_CHANNEL_ID, RESULT_CHANNEL_ID
 from entity import Match, User
 from helpers import now_vn, format_vn_time, parse_duration
 
@@ -18,11 +19,12 @@ log = logging.getLogger(__name__)
 
 def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
     """
-    Create and return the three periodic task loops:
+    Create and return the four periodic task loops:
 
-    - ``match_scheduler``         – checks for upcoming check-in windows and posts reminders.
-    - ``cleanup_scheduler``       – marks finished matches with an end_time.
-    - ``monthly_reset_scheduler`` – resets monthly_elo_gain for all users on the 1st of each month.
+    - ``match_scheduler``          – checks for upcoming check-in windows and posts reminders.
+    - ``cleanup_scheduler``        – marks finished matches with an end_time.
+    - ``monthly_reset_scheduler``  – resets monthly_elo_gain for all users on the 1st of each month.
+    - ``message_cleanup_scheduler`` – deletes bot messages for matches ended/cancelled 6+ hours ago.
 
     The caller is responsible for starting / stopping all loops.
     """
@@ -162,4 +164,83 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
     # Initialise the tracking attribute before the loop is ever started
     monthly_reset_scheduler._last_reset_month = (None, None)
 
-    return match_scheduler, cleanup_scheduler, monthly_reset_scheduler
+    @tasks.loop(minutes=15)
+    async def message_cleanup_scheduler() -> None:
+        """Delete bot messages for matches that ended or were cancelled 6+ hours ago.
+
+        Deletes:
+        - The registration embed (match.register_message_id in REGISTER_CHANNEL_ID)
+        - The check-in embed     (match.checkin_message_id  in CHECKIN_CHANNEL_ID)
+        - Each lobby's result-entry embed (lobby.result_message_id in RESULT_CHANNEL_ID)
+
+        Message IDs are set to NULL after deletion to avoid repeated attempts.
+        """
+        from entity import Lobby
+
+        now = now_vn()
+        cutoff = now - timedelta(hours=6)
+
+        with db_session_factory() as session:
+            matches_to_clean = (
+                session.query(Match)
+                .filter(
+                    Match.end_time.isnot(None),
+                    Match.end_time <= cutoff,
+                )
+                .all()
+            )
+            # Snapshot data to avoid detached-instance issues outside the session
+            match_snapshots = [
+                (m.id, m.register_message_id, m.checkin_message_id)
+                for m in matches_to_clean
+                if m.register_message_id or m.checkin_message_id
+            ]
+            # Snapshot lobby data for result-message cleanup
+            all_match_ids = [m.id for m in matches_to_clean]
+            lobby_snapshots = []
+            if all_match_ids:
+                lobbies = (
+                    session.query(Lobby)
+                    .filter(
+                        Lobby.match_id.in_(all_match_ids),
+                        Lobby.result_message_id.isnot(None),
+                    )
+                    .all()
+                )
+                lobby_snapshots = [(lb.id, lb.result_message_id) for lb in lobbies]
+
+        async def _try_delete(channel_id, message_id, label: str) -> None:
+            if not channel_id or not message_id:
+                return
+            ch = bot.get_channel(channel_id)
+            if ch is None:
+                return
+            try:
+                msg = await ch.fetch_message(message_id)
+                await msg.delete()
+            except discord.NotFound:
+                pass
+            except Exception as exc:
+                log.warning("Could not delete %s (msg=%s): %s", label, message_id, exc)
+
+        # Delete match-level messages
+        for match_id, reg_msg_id, checkin_msg_id in match_snapshots:
+            await _try_delete(REGISTER_CHANNEL_ID, reg_msg_id, f"register_message match#{match_id}")
+            await _try_delete(CHECKIN_CHANNEL_ID, checkin_msg_id, f"checkin_message match#{match_id}")
+            with db_session_factory() as session:
+                db_match = session.get(Match, match_id)
+                if db_match:
+                    db_match.register_message_id = None
+                    db_match.checkin_message_id = None
+                    session.commit()
+
+        # Delete lobby result-entry messages
+        for lobby_id, result_msg_id in lobby_snapshots:
+            await _try_delete(RESULT_CHANNEL_ID, result_msg_id, f"result_message lobby#{lobby_id}")
+            with db_session_factory() as session:
+                db_lobby = session.get(Lobby, lobby_id)
+                if db_lobby:
+                    db_lobby.result_message_id = None
+                    session.commit()
+
+    return match_scheduler, cleanup_scheduler, monthly_reset_scheduler, message_cleanup_scheduler

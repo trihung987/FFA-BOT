@@ -25,7 +25,7 @@ register_match_commands(bot, SessionLocal)
 register_leaderboard_commands(bot, SessionLocal)
 
 # Create background schedulers (they are started inside on_ready)
-match_scheduler, cleanup_scheduler, monthly_reset_scheduler = setup_scheduler(bot, SessionLocal)
+match_scheduler, cleanup_scheduler, monthly_reset_scheduler, message_cleanup_scheduler = setup_scheduler(bot, SessionLocal)
 
 
 # ── Global error handler ───────────────────────────────────────────────────────
@@ -56,6 +56,8 @@ async def on_ready():
         cleanup_scheduler.start()
     if not monthly_reset_scheduler.is_running():
         monthly_reset_scheduler.start()
+    if not message_cleanup_scheduler.is_running():
+        message_cleanup_scheduler.start()
     await bot.tree.sync(guild=guild_obj)
     print(f"Logged in as {bot.user}")
 
