@@ -369,3 +369,405 @@ class CheckInView(discord.ui.View):
 
         await interaction.response.edit_message(embed=new_embed, view=self)
 
+
+# ── Result-entry embed builder ────────────────────────────────────────────────
+
+
+def build_lobby_result_embed(lobby, match) -> discord.Embed:
+    """Build the result-entry embed posted in the result channel (one per lobby).
+
+    ``lobby`` and ``match`` may be plain snapshot objects or ORM instances –
+    only attribute access is used.
+    """
+    from lobby_division import TIER_EMOJI
+
+    tier: str = lobby.tier or ""
+    emoji = TIER_EMOJI.get(tier, "🎮")
+    title = f"{emoji} Nhập Kết Quả – Lobby {tier} #{lobby.lobby_number}"
+
+    status_labels = {
+        "active": "🟢 Đang diễn ra",
+        "cancelled": "🔴 Đã hủy",
+        "finished": "✅ Đã kết thúc",
+    }
+    status_str = status_labels.get(lobby.status or "active", lobby.status or "active")
+
+    map_names: list = match.name_maps or []
+    count_fight: int = match.count_fight
+    scores: dict = lobby.scores or {}
+
+    lines = [
+        f"🆔 **Match:** #{match.id}",
+        f"📊 **Trạng thái:** {status_str}",
+        f"🎯 **Số trận:** {count_fight}",
+        "",
+        "**📋 Kết quả đã nhập:**",
+    ]
+
+    for i in range(1, count_fight + 1):
+        fight_key = f"fight_{i}"
+        map_name = map_names[i - 1] if i - 1 < len(map_names) else f"map{i}"
+        fight_scores: dict = scores.get(fight_key, {})
+        if fight_scores:
+            score_lines = []
+            for uid, score in fight_scores.items():
+                mention = f"<@{uid}>" if uid.isdigit() else uid
+                score_lines.append(f"  • {mention}: **{score}**")
+            lines.append(f"⚔️ **Trận {i} ({map_name}):**\n" + "\n".join(score_lines))
+        else:
+            lines.append(f"⚔️ **Trận {i} ({map_name}):** _(chưa có kết quả)_")
+
+    color = (
+        discord.Color.orange()
+        if (lobby.status or "active") == "active"
+        else discord.Color.dark_gray()
+    )
+    embed = discord.Embed(
+        title=title,
+        description="\n".join(lines),
+        color=color,
+    )
+    embed.set_footer(text=f"Lobby ID: {lobby.id} | Match #{match.id}")
+    return embed
+
+
+# ── Score input modals ────────────────────────────────────────────────────────
+
+# Discord modals support a maximum of 5 TextInput components.
+_MODAL_PAGE_SIZE = 5
+
+
+class ScoreModal(discord.ui.Modal):
+    """Modal for entering scores for one fight in a lobby.
+
+    For lobbies with more than 5 real players a second modal (page 2) is
+    chained automatically after this one is submitted.
+
+    Parameters
+    ----------
+    lobby_id:
+        Primary key of the Lobby row.
+    fight_idx:
+        1-based fight number.
+    page_entries:
+        List of ``(str_key, display_label)`` for this modal page (max 5).
+        ``str_key`` is ``str(user_id)`` or ``"AI_N"``.
+    db_session_factory:
+        SQLAlchemy session factory.
+    overflow_entries:
+        Remaining entries for a chained second modal (empty for the last page).
+    partial_scores:
+        Scores already collected from previous pages (passed along the chain).
+    result_message_id:
+        The Discord message ID of the result embed to update after saving.
+    result_channel_id:
+        The Discord channel ID where *result_message_id* lives.
+    """
+
+    def __init__(
+        self,
+        lobby_id: int,
+        fight_idx: int,
+        page_entries: list[tuple[str, str]],
+        db_session_factory,
+        overflow_entries: list[tuple[str, str]] | None = None,
+        partial_scores: dict[str, str] | None = None,
+        result_message_id: int | None = None,
+        result_channel_id: int | None = None,
+    ) -> None:
+        super().__init__(title=f"Nhập điểm Trận {fight_idx}")
+        self.lobby_id = lobby_id
+        self.fight_idx = fight_idx
+        self.db_session_factory = db_session_factory
+        self.overflow_entries = overflow_entries or []
+        self.partial_scores: dict[str, str] = partial_scores or {}
+        self.result_message_id = result_message_id
+        self.result_channel_id = result_channel_id
+
+        self._inputs: list[tuple[str, discord.ui.TextInput]] = []
+        for key, label in page_entries:
+            inp = discord.ui.TextInput(
+                label=label[:44] + "…" if len(label) > 45 else label,
+                placeholder="Nhập điểm số",
+                required=True,
+                max_length=10,
+            )
+            self._inputs.append((key, inp))
+            self.add_item(inp)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        from entity import Lobby, Match
+
+        new_scores = {key: inp.value for key, inp in self._inputs}
+
+        if self.overflow_entries:
+            # Chain to page 2
+            modal2 = ScoreModal(
+                lobby_id=self.lobby_id,
+                fight_idx=self.fight_idx,
+                page_entries=self.overflow_entries,
+                db_session_factory=self.db_session_factory,
+                overflow_entries=[],
+                partial_scores={**self.partial_scores, **new_scores},
+                result_message_id=self.result_message_id,
+                result_channel_id=self.result_channel_id,
+            )
+            await interaction.response.send_modal(modal2)
+            return
+
+        # Final page – save all scores
+        all_scores = {**self.partial_scores, **new_scores}
+        fight_key = f"fight_{self.fight_idx}"
+
+        tier = ""
+        lobby_num = 0
+        match_id = 0
+
+        with self.db_session_factory() as session:
+            lobby = session.get(Lobby, self.lobby_id)
+            if lobby is None:
+                await interaction.response.send_message(
+                    "❌ Lobby không tồn tại.", ephemeral=True
+                )
+                return
+
+            existing_scores = dict(lobby.scores or {})
+            existing_scores[fight_key] = all_scores
+            lobby.scores = existing_scores
+            session.commit()
+
+            tier = lobby.tier or ""
+            lobby_num = lobby.lobby_number or 0
+            match_id = lobby.match_id
+
+        await interaction.response.send_message(
+            f"✅ Đã lưu kết quả Trận {self.fight_idx} "
+            f"cho Lobby {tier} #{lobby_num}!",
+            ephemeral=True,
+        )
+
+        # Update the result embed in the result channel
+        if self.result_channel_id and self.result_message_id:
+            ch = interaction.client.get_channel(self.result_channel_id)
+            if ch:
+                try:
+                    msg = await ch.fetch_message(self.result_message_id)
+                    new_embed = None
+                    with self.db_session_factory() as session:
+                        lobby = session.get(Lobby, self.lobby_id)
+                        match = session.get(Match, match_id)
+                        if lobby and match:
+                            new_embed = build_lobby_result_embed(lobby, match)
+                    if new_embed:
+                        await msg.edit(embed=new_embed)
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+
+
+# ── Result view (fight buttons + cancel + finalize) ───────────────────────────
+
+
+class LobbyResultView(discord.ui.View):
+    """Persistent view attached to each lobby's result-entry embed.
+
+    Buttons
+    -------
+    - N blue buttons labelled "Trận N map_name" (one per fight)
+    - 1 red  "Hủy Lobby" button
+    - 1 green "Chốt Kết Quả" button
+
+    Only server administrators may interact with these buttons.
+    """
+
+    def __init__(
+        self,
+        lobby_id: int,
+        count_fight: int,
+        map_names: list[str],
+        db_session_factory,
+    ) -> None:
+        super().__init__(timeout=None)
+        self.lobby_id = lobby_id
+        self.count_fight = count_fight
+        self.map_names = map_names
+        self.db_session_factory = db_session_factory
+
+        # Row 0: fight buttons (up to 5; count_fight is capped at 5 by open_registration)
+        for i in range(1, count_fight + 1):
+            map_name = map_names[i - 1] if i - 1 < len(map_names) else f"map{i}"
+            btn = discord.ui.Button(
+                label=f"Trận {i} {map_name}",
+                style=discord.ButtonStyle.primary,
+                row=0,
+            )
+            btn.callback = self._make_fight_callback(i)
+            self.add_item(btn)
+
+        # Row 1: management buttons
+        cancel_btn = discord.ui.Button(
+            label="Hủy Lobby",
+            style=discord.ButtonStyle.danger,
+            row=1,
+        )
+        cancel_btn.callback = self._cancel_lobby
+        self.add_item(cancel_btn)
+
+        finalize_btn = discord.ui.Button(
+            label="Chốt Kết Quả ✅",
+            style=discord.ButtonStyle.success,
+            row=1,
+        )
+        finalize_btn.callback = self._finalize_lobby
+        self.add_item(finalize_btn)
+
+    # ── Helpers ──────────────────────────────────────────────────────────────
+
+    def _make_fight_callback(self, fight_idx: int):
+        async def callback(interaction: discord.Interaction) -> None:
+            await self._open_score_modal(interaction, fight_idx)
+        return callback
+
+    async def _check_admin(self, interaction: discord.Interaction) -> bool:
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "❌ Chỉ admin mới có thể sử dụng chức năng này.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _open_score_modal(
+        self, interaction: discord.Interaction, fight_idx: int
+    ) -> None:
+        if not await self._check_admin(interaction):
+            return
+
+        from entity import Lobby, User
+        from config import RESULT_CHANNEL_ID
+
+        with self.db_session_factory() as session:
+            lobby = session.get(Lobby, self.lobby_id)
+            if lobby is None:
+                await interaction.response.send_message(
+                    "❌ Lobby không tồn tại.", ephemeral=True
+                )
+                return
+            if lobby.status != "active":
+                await interaction.response.send_message(
+                    f"⚠️ Lobby này đã ở trạng thái **{lobby.status}**.", ephemeral=True
+                )
+                return
+
+            users_list: list = lobby.users_list or []
+            result_msg_id = lobby.result_message_id
+            users = (
+                session.query(User).filter(User.id.in_(users_list)).all()
+                if users_list
+                else []
+            )
+            p_map = {u.id: (u.ingame_name or f"User{u.id}") for u in users}
+
+        # Build page entries: (str_key, display_label)
+        entries: list[tuple[str, str]] = []
+        for uid in users_list:
+            label = p_map.get(uid, f"User{uid}")
+            entries.append((str(uid), label))
+
+        page1 = entries[:_MODAL_PAGE_SIZE]
+        overflow = entries[_MODAL_PAGE_SIZE:]
+
+        modal = ScoreModal(
+            lobby_id=self.lobby_id,
+            fight_idx=fight_idx,
+            page_entries=page1,
+            db_session_factory=self.db_session_factory,
+            overflow_entries=overflow,
+            partial_scores={},
+            result_message_id=result_msg_id,
+            result_channel_id=RESULT_CHANNEL_ID,
+        )
+        await interaction.response.send_modal(modal)
+
+    async def _cancel_lobby(self, interaction: discord.Interaction) -> None:
+        if not await self._check_admin(interaction):
+            return
+
+        from entity import Lobby, Match
+
+        with self.db_session_factory() as session:
+            lobby = session.get(Lobby, self.lobby_id)
+            if lobby is None:
+                await interaction.response.send_message(
+                    "❌ Lobby không tồn tại.", ephemeral=True
+                )
+                return
+            if lobby.status != "active":
+                await interaction.response.send_message(
+                    f"⚠️ Lobby đã ở trạng thái **{lobby.status}**.", ephemeral=True
+                )
+                return
+
+            lobby.status = "cancelled"
+            session.commit()
+            match = session.get(Match, lobby.match_id)
+            new_embed = build_lobby_result_embed(lobby, match) if match else None
+
+        if new_embed:
+            # Disable all buttons
+            for item in self.children:
+                item.disabled = True
+            await interaction.response.edit_message(embed=new_embed, view=self)
+        else:
+            await interaction.response.send_message(
+                "✅ Lobby đã bị hủy.", ephemeral=True
+            )
+
+    async def _finalize_lobby(self, interaction: discord.Interaction) -> None:
+        if not await self._check_admin(interaction):
+            return
+
+        from entity import Lobby, Match
+
+        with self.db_session_factory() as session:
+            lobby = session.get(Lobby, self.lobby_id)
+            if lobby is None:
+                await interaction.response.send_message(
+                    "❌ Lobby không tồn tại.", ephemeral=True
+                )
+                return
+            if lobby.status != "active":
+                await interaction.response.send_message(
+                    f"⚠️ Lobby đã ở trạng thái **{lobby.status}**.", ephemeral=True
+                )
+                return
+
+            # Verify all fights have scores entered
+            scores: dict = lobby.scores or {}
+            match = session.get(Match, lobby.match_id)
+            count_fight = match.count_fight if match else self.count_fight
+
+            missing_fights = [
+                i for i in range(1, count_fight + 1)
+                if not scores.get(f"fight_{i}")
+            ]
+            if missing_fights:
+                missing_str = ", ".join(f"Trận {i}" for i in missing_fights)
+                await interaction.response.send_message(
+                    f"⚠️ Chưa nhập kết quả cho: **{missing_str}**. "
+                    "Vui lòng nhập đủ trước khi chốt.",
+                    ephemeral=True,
+                )
+                return
+
+            lobby.status = "finished"
+            session.commit()
+            new_embed = build_lobby_result_embed(lobby, match) if match else None
+
+        if new_embed:
+            for item in self.children:
+                item.disabled = True
+            await interaction.response.edit_message(embed=new_embed, view=self)
+        else:
+            await interaction.response.send_message(
+                "✅ Lobby đã được chốt kết quả.", ephemeral=True
+            )
+
