@@ -3,6 +3,7 @@ Slash commands for match management.
 """
 
 import logging
+from datetime import timedelta
 
 import discord
 from discord import app_commands
@@ -10,6 +11,7 @@ from discord.ext import commands as ext_commands
 from typing import Optional
 
 from config import GUILD_ID, REGISTER_CHANNEL_ID
+from helpers import now_vn
 from views import MapNamesModal
 
 log = logging.getLogger(__name__)
@@ -101,6 +103,22 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                 "HTTP error sending open_registration modal (user=%s): %s",
                 interaction.user.id, exc,
             )
+
+    @open_registration.autocomplete("time_start")
+    async def time_start_autocomplete(
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        """Suggest the next 24 full-hour slots in Vietnam time (UTC+7)."""
+        base = now_vn().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        choices: list[app_commands.Choice[str]] = []
+        for i in range(24):
+            value = (base + timedelta(hours=i)).strftime("%Y-%m-%d %H:%M")
+            if current in value:
+                choices.append(app_commands.Choice(name=value, value=value))
+            if len(choices) >= 25:
+                break
+        return choices
 
     @bot.tree.command(
         name="set_ingame_name",
