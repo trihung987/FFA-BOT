@@ -122,17 +122,37 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
 
     _DURATION_PRESETS = ["15p", "20p", "30p", "45p", "1h", "1h30p", "2h"]
 
+    def _duration_choices(current: str) -> list[app_commands.Choice[str]]:
+        """Return up to 25 duration choices for *current* input.
+
+        If the user typed a plain number (e.g. ``30``), suggest ``<n>p``
+        (minutes) and ``<n>h`` (hours) first, then append any presets that
+        contain the typed string.  Otherwise filter the preset list by the
+        typed string.
+        """
+        choices: list[app_commands.Choice[str]] = []
+        stripped = current.strip()
+        if stripped.isdigit():
+            generated = [f"{stripped}p", f"{stripped}h"]
+            for val in generated:
+                choices.append(app_commands.Choice(name=val, value=val))
+            for p in _DURATION_PRESETS:
+                if p not in generated and stripped in p:
+                    choices.append(app_commands.Choice(name=p, value=p))
+        else:
+            needle = stripped.lower()
+            for p in _DURATION_PRESETS:
+                if needle in p:
+                    choices.append(app_commands.Choice(name=p, value=p))
+        return choices[:25]
+
     @open_registration.autocomplete("time_reach_checkin")
     async def time_reach_checkin_autocomplete(
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
         """Suggest common check-in open durations."""
-        return [
-            app_commands.Choice(name=p, value=p)
-            for p in _DURATION_PRESETS
-            if current.lower() in p
-        ]
+        return _duration_choices(current)
 
     @open_registration.autocomplete("time_reach_divide_lobby")
     async def time_reach_divide_lobby_autocomplete(
@@ -140,11 +160,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         current: str,
     ) -> list[app_commands.Choice[str]]:
         """Suggest common lobby-divide durations."""
-        return [
-            app_commands.Choice(name=p, value=p)
-            for p in _DURATION_PRESETS
-            if current.lower() in p
-        ]
+        return _duration_choices(current)
 
     @bot.tree.command(
         name="set_ingame_name",
