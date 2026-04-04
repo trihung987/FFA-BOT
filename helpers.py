@@ -9,10 +9,17 @@ def parse_duration(value: str) -> timedelta:
     """Convert a human-readable duration string to a :class:`timedelta`.
 
     Supported formats:
-    - ``"1h"``  → 1 hour
-    - ``"30p"`` → 30 minutes
+    - ``"1h"``    → 1 hour
+    - ``"30p"``   → 30 minutes
+    - ``"1h30p"`` → 1 hour 30 minutes
     """
-    m = re.fullmatch(r"(\d+)([hp])", value.strip().lower())
+    s = value.strip().lower()
+    # Combined format: e.g. "1h30p"
+    m = re.fullmatch(r"(\d+)h(\d+)p", s)
+    if m:
+        return timedelta(hours=int(m.group(1)), minutes=int(m.group(2)))
+    # Single-component format: e.g. "1h" or "30p"
+    m = re.fullmatch(r"(\d+)([hp])", s)
     if not m:
         raise ValueError(f"Unrecognised duration format: {value!r}")
     amount = int(m.group(1))
