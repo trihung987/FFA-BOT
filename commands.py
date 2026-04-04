@@ -104,45 +104,38 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
 
     @bot.tree.command(
         name="set_ingame_name",
-        description="Đặt tên in-game (và ELO khởi đầu nếu là admin) cho người chơi.",
+        description="[Admin] Đặt tên in-game và ELO cho @người chơi. Tạo mới nếu chưa có hồ sơ.",
         guild=guild_obj,
     )
     @app_commands.describe(
+        player="Người chơi cần đặt thông tin",
         name="Tên in-game trong game",
-        elo="ELO khởi đầu (mặc định 1000, chỉ admin mới dùng được)",
+        elo="ELO của người chơi (mặc định 1000 khi tạo mới)",
     )
+    @app_commands.checks.has_permissions(administrator=True)
     async def set_ingame_name(
         interaction: discord.Interaction,
+        player: discord.Member,
         name: str,
         elo: Optional[int] = None,
     ) -> None:
-        """Allow a player to set (or update) their in-game name.
+        """[Admin] Set or update in-game name and ELO for a target player.
 
-        Admins may additionally supply an *elo* value which overrides the
-        player's current ELO.  For new players the ELO defaults to 1000.
+        Creates a new profile if the player has none, otherwise updates the
+        existing record.  Only server administrators may use this command.
         """
         from entity import User
 
-        user_id = interaction.user.id
-        is_admin = interaction.user.guild_permissions.administrator
-
-        # Non-admins must not be able to set an explicit ELO value.
-        if elo is not None and not is_admin:
-            await _safe_send(
-                interaction, "set_ingame_name",
-                "❌ Chỉ admin mới có thể đặt ELO.", ephemeral=True,
-            )
-            return
-
         try:
             with db_session_factory() as session:
-                user = session.get(User, user_id)
+                user = session.get(User, player.id)
                 if user is None:
                     initial_elo = elo if elo is not None else 1000
-                    user = User(id=user_id, ingame_name=name, elo=initial_elo)
+                    user = User(id=player.id, ingame_name=name, elo=initial_elo)
                     session.add(user)
                     msg = (
-                        f"✅ Đã tạo hồ sơ: tên in-game **{name}**, ELO **{initial_elo}**."
+                        f"✅ Đã tạo hồ sơ cho {player.mention}: "
+                        f"tên in-game **{name}**, ELO **{initial_elo}**."
                     )
                 else:
                     user.ingame_name = name
@@ -152,13 +145,13 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                         user.last_elo_change = delta
                         if delta > 0:
                             user.monthly_elo_gain = (user.monthly_elo_gain or 0) + delta
-                    msg = f"✅ Đã cập nhật tên in-game: **{name}**"
+                    msg = f"✅ Đã cập nhật hồ sơ cho {player.mention}: tên in-game **{name}**"
                     if elo is not None:
                         msg += f", ELO: **{elo}**"
                     msg += "."
                 session.commit()
         except Exception as exc:
-            log.exception("DB error in set_ingame_name (user=%s)", user_id)
+            log.exception("DB error in set_ingame_name (admin=%s, player=%s)", interaction.user.id, player.id)
             await _safe_send(
                 interaction, "set_ingame_name",
                 "❌ Đã xảy ra lỗi nội bộ khi lưu dữ liệu.", ephemeral=True,
