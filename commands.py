@@ -120,6 +120,32 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                 break
         return choices
 
+    _DURATION_PRESETS = ["15p", "20p", "30p", "45p", "1h", "1h30p", "2h"]
+
+    @open_registration.autocomplete("time_reach_checkin")
+    async def time_reach_checkin_autocomplete(
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        """Suggest common check-in open durations."""
+        return [
+            app_commands.Choice(name=p, value=p)
+            for p in _DURATION_PRESETS
+            if current.lower() in p
+        ]
+
+    @open_registration.autocomplete("time_reach_divide_lobby")
+    async def time_reach_divide_lobby_autocomplete(
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        """Suggest common lobby-divide durations."""
+        return [
+            app_commands.Choice(name=p, value=p)
+            for p in _DURATION_PRESETS
+            if current.lower() in p
+        ]
+
     @bot.tree.command(
         name="set_ingame_name",
         description="[Admin] Đặt tên in-game và ELO cho @người chơi. Tạo mới nếu chưa có hồ sơ.",
