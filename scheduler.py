@@ -5,6 +5,7 @@ Background task schedulers for check-in and lobby-division reminders.
 from __future__ import annotations
 
 import logging
+import types
 from datetime import timedelta
 
 import discord
@@ -28,6 +29,9 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
 
     The caller is responsible for starting / stopping all loops.
     """
+
+    # Minimum registered players required to proceed with a match
+    _MIN_PLAYERS = 6
 
     @tasks.loop(minutes=1)
     async def match_scheduler() -> None:
@@ -55,21 +59,112 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 continue
             checkin_time = time_start - checkin_delta
             if abs((now - checkin_time).total_seconds()) < 60:
-                # 1. Disable the registration message so users can no longer join/cancel
+                # --- Atomic status guard: only one scheduler tick may claim check-in ---
+                try:
+                    with db_session_factory() as session:
+                        claimed = (
+                            session.query(Match)
+                            .filter(
+                                Match.id == match.id,
+                                Match.status.in_([None, "open"]),
+                            )
+                            .update({"status": "checkin"}, synchronize_session=False)
+                        )
+                        session.commit()
+                except Exception:
+                    log.exception(
+                        "match_scheduler: DB error claiming checkin for match #%s",
+                        match.id,
+                    )
+                    continue
+
+                if claimed == 0:
+                    # Another tick already handled this check-in – skip entirely
+                    log.debug(
+                        "match_scheduler: check-in for match #%s already claimed – skipping",
+                        match.id,
+                    )
+                    continue
+
+                # Reload fresh match data after status update
+                try:
+                    with db_session_factory() as session:
+                        db_match = session.get(Match, match.id)
+                        if db_match is None:
+                            log.warning(
+                                "match_scheduler: match #%s disappeared after check-in claim",
+                                match.id,
+                            )
+                            continue
+                        registered = list(db_match.register_users_id or [])
+                        reg_msg_id = db_match.register_message_id
+                except Exception:
+                    log.exception(
+                        "match_scheduler: DB error reloading match #%s after check-in claim",
+                        match.id,
+                    )
+                    continue
+
                 register_channel = bot.get_channel(REGISTER_CHANNEL_ID)
-                if register_channel and match.register_message_id:
+
+                # --- Not enough players: cancel the match ---
+                if len(registered) < _MIN_PLAYERS:
+                    # Reply to the registration message with a cancellation notice
+                    if register_channel and reg_msg_id:
+                        try:
+                            reg_msg = await register_channel.fetch_message(reg_msg_id)
+                            await reg_msg.reply(
+                                f"❌ **Match #{match.id} đã bị hủy** vì không đủ người đăng ký "
+                                f"(**{len(registered)}/{_MIN_PLAYERS}** người tối thiểu)."
+                            )
+                            await reg_msg.edit(view=discord.ui.View())
+                        except discord.NotFound:
+                            log.debug(
+                                "match_scheduler: register message %s for match #%s not found",
+                                reg_msg_id, match.id,
+                            )
+                        except discord.HTTPException as exc:
+                            log.error(
+                                "match_scheduler: failed to notify cancellation for match #%s: %s",
+                                match.id, exc,
+                            )
+
+                    # Mark match as cancelled
                     try:
-                        reg_msg = await register_channel.fetch_message(match.register_message_id)
-                        # Passing an empty View removes all action-row components from the message
-                        await reg_msg.edit(view=discord.ui.View())
+                        with db_session_factory() as session:
+                            db_match = session.get(Match, match.id)
+                            if db_match is not None:
+                                db_match.status = "cancelled"
+                                db_match.end_time = now
+                                session.commit()
+                    except Exception:
+                        log.exception(
+                            "match_scheduler: DB error cancelling match #%s",
+                            match.id,
+                        )
+                    continue
+
+                # --- Enough players: start check-in ---
+
+                # 1. Edit registration message: disable buttons + add "check-in started" notice
+                if register_channel and reg_msg_id:
+                    try:
+                        from views import build_registration_embed, _load_player_map
+
+                        reg_msg = await register_channel.fetch_message(reg_msg_id)
+                        with db_session_factory() as session:
+                            db_match = session.get(Match, match.id)
+                            p_map = _load_player_map(session, registered)
+                            reg_embed = build_registration_embed(db_match, p_map, checkin_started=True)
+                        await reg_msg.edit(embed=reg_embed, view=discord.ui.View())
                     except discord.NotFound:
                         log.debug(
-                            "match_scheduler: register message %s for match #%s not found – already deleted",
-                            match.register_message_id, match.id,
+                            "match_scheduler: register message %s for match #%s not found",
+                            reg_msg_id, match.id,
                         )
                     except discord.HTTPException as exc:
                         log.error(
-                            "match_scheduler: failed to disable register message for match #%s: %s",
+                            "match_scheduler: failed to edit register message for match #%s: %s",
                             match.id, exc,
                         )
                 elif not register_channel:
@@ -83,8 +178,6 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 if checkin_channel:
                     from views import CheckInView, build_checkin_embed, _load_player_map
 
-                    registered = match.register_users_id or []
-
                     # Build the initial check-in embed with current player names
                     try:
                         with db_session_factory() as session:
@@ -97,7 +190,7 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                                 continue
                             p_map = _load_player_map(session, registered)
                             embed = build_checkin_embed(db_match, p_map)
-                    except Exception as exc:
+                    except Exception:
                         log.exception(
                             "match_scheduler: DB error building check-in embed for match #%s",
                             match.id,
@@ -113,7 +206,7 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                         checkin_msg = await checkin_channel.send(
                             content=content, embed=embed, view=view
                         )
-                    except discord.HTTPException as exc:
+                    except discord.HTTPException:
                         log.exception(
                             "match_scheduler: failed to send check-in message for match #%s",
                             match.id,
@@ -127,7 +220,7 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                             if db_match is not None:
                                 db_match.checkin_message_id = checkin_msg.id
                                 session.commit()
-                    except Exception as exc:
+                    except Exception:
                         log.exception(
                             "match_scheduler: DB error saving checkin_message_id for match #%s",
                             match.id,
@@ -149,6 +242,90 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 continue
             divide_time = time_start - divide_delta
             if abs((now - divide_time).total_seconds()) < 60:
+                # --- Atomic status guard: only process lobby division when check-in is done ---
+                try:
+                    with db_session_factory() as session:
+                        claimed = (
+                            session.query(Match)
+                            .filter(
+                                Match.id == match.id,
+                                Match.status == "checkin",
+                            )
+                            .update({"status": "dividing"}, synchronize_session=False)
+                        )
+                        session.commit()
+                except Exception:
+                    log.exception(
+                        "match_scheduler: DB error claiming divide for match #%s",
+                        match.id,
+                    )
+                    continue
+
+                if claimed == 0:
+                    log.debug(
+                        "match_scheduler: divide for match #%s already claimed or wrong state – skipping",
+                        match.id,
+                    )
+                    continue
+
+                # Reload the match inside a fresh session so all check-ins are visible
+                snap = None
+                try:
+                    with db_session_factory() as session:
+                        fresh_match = session.get(Match, match.id)
+                        if fresh_match is not None:
+                            snap = types.SimpleNamespace(
+                                id=fresh_match.id,
+                                checkin_users_id=list(fresh_match.checkin_users_id or []),
+                                checkin_message_id=fresh_match.checkin_message_id,
+                                register_users_id=list(fresh_match.register_users_id or []),
+                                count_fight=fresh_match.count_fight,
+                                name_maps=list(fresh_match.name_maps or []),
+                                time_start=fresh_match.time_start,
+                                time_reach_checkin=fresh_match.time_reach_checkin,
+                                time_reach_divide_lobby=fresh_match.time_reach_divide_lobby,
+                            )
+                        else:
+                            log.warning(
+                                "match_scheduler: match #%s not found when building snap for divide",
+                                match.id,
+                            )
+                except Exception:
+                    log.exception(
+                        "match_scheduler: DB error building snap for divide (match #%s)",
+                        match.id,
+                    )
+
+                if snap is None:
+                    continue
+
+                # 1. Edit check-in message: disable button + show "ended" notice
+                checkin_channel = bot.get_channel(CHECKIN_CHANNEL_ID)
+                if checkin_channel and snap.checkin_message_id:
+                    try:
+                        from views import build_checkin_embed, _load_player_map
+
+                        checkin_msg_obj = await checkin_channel.fetch_message(snap.checkin_message_id)
+                        with db_session_factory() as session:
+                            db_match = session.get(Match, snap.id)
+                            all_ids = list(
+                                set((db_match.register_users_id or []) + (db_match.checkin_users_id or []))
+                            ) if db_match else []
+                            p_map = _load_player_map(session, all_ids)
+                            ended_embed = build_checkin_embed(db_match, p_map, ended=True)
+                        await checkin_msg_obj.edit(embed=ended_embed, view=discord.ui.View())
+                    except discord.NotFound:
+                        log.debug(
+                            "match_scheduler: check-in message %s for match #%s not found",
+                            snap.checkin_message_id, snap.id,
+                        )
+                    except discord.HTTPException as exc:
+                        log.error(
+                            "match_scheduler: failed to update check-in message for match #%s: %s",
+                            snap.id, exc,
+                        )
+
+                # 2. Send announcement to divide-lobby channel
                 channel = bot.get_channel(DIVIDE_LOBBY_CHANNEL_ID)
                 if channel:
                     try:
@@ -166,43 +343,15 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                         "match_scheduler: divide-lobby channel %s not found (match #%s)",
                         DIVIDE_LOBBY_CHANNEL_ID, match.id,
                     )
-                # Run the full lobby-division pipeline
-                from lobby_division import divide_lobbies
-                import types
 
-                # Reload the match inside a fresh session so all check-ins are visible
-                snap = None
+                # 3. Run the full lobby-division pipeline
+                from lobby_division import divide_lobbies
                 try:
-                    with db_session_factory() as session:
-                        fresh_match = session.get(Match, match.id)
-                        if fresh_match is not None:
-                            # Make a plain-namespace copy to avoid detached-instance issues
-                            snap = types.SimpleNamespace(
-                                id=fresh_match.id,
-                                checkin_users_id=list(fresh_match.checkin_users_id or []),
-                                count_fight=fresh_match.count_fight,
-                                name_maps=list(fresh_match.name_maps or []),
-                                time_start=fresh_match.time_start,
-                                time_reach_checkin=fresh_match.time_reach_checkin,
-                                time_reach_divide_lobby=fresh_match.time_reach_divide_lobby,
-                            )
-                        else:
-                            log.warning(
-                                "match_scheduler: match #%s not found when building snap for divide",
-                                match.id,
-                            )
-                except Exception as exc:
+                    await divide_lobbies(bot, snap, db_session_factory)
+                except Exception:
                     log.exception(
-                        "match_scheduler: DB error building snap for divide (match #%s)",
-                        match.id,
+                        "divide_lobbies error for match #%s", match.id
                     )
-                if snap is not None:
-                    try:
-                        await divide_lobbies(bot, snap, db_session_factory)
-                    except Exception as exc:
-                        log.exception(
-                            "divide_lobbies error for match #%s", match.id
-                        )
 
     @match_scheduler.error
     async def match_scheduler_error(error: Exception) -> None:

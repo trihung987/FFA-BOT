@@ -61,7 +61,7 @@ def _load_player_map(session, user_ids: list[int]) -> dict[int, str]:
     return {u.id: (u.ingame_name or "Unknown") for u in users}
 
 
-def build_registration_embed(match, p_map: dict[int, str]) -> discord.Embed:
+def build_registration_embed(match, p_map: dict[int, str], *, checkin_started: bool = False) -> discord.Embed:
     """Build (or rebuild) the registration embed for *match*.
 
     Parameters
@@ -71,6 +71,9 @@ def build_registration_embed(match, p_map: dict[int, str]) -> discord.Embed:
         needed attributes already loaded).
     p_map:
         Dict mapping Discord user ID (int) → in-game name (str).
+    checkin_started:
+        When *True*, append a notice that check-in is now open and registration
+        is closed.
     """
     time_start = match.time_start
 
@@ -96,25 +99,31 @@ def build_registration_embed(match, p_map: dict[int, str]) -> discord.Embed:
         or "_(chưa có ai)_"
     )
 
+    body = (
+        f"🆔 **Match ID:** #{match.id}\n"
+        f"🎯 **Số trận:** {match.count_fight}\n"
+        f"📅 **Giờ bắt đầu:** {format_vn_time(time_start)}\n"
+        f"⏰ **Check-in:** {checkin_display}\n"
+        f"🔀 **Chia lobby:** {divide_display}\n"
+        f"🗺️ **Maps:** {', '.join(map_names)}\n\n"
+        f"👥 **Đã đăng ký: {len(registered)} người**\n"
+        f"{reg_list_str}"
+    )
+
+    if checkin_started:
+        body += "\n\n⏰ **Đã đến giờ check-in! Đăng ký đã đóng.**"
+    else:
+        body += "\n\nNhấn **Tham gia** để đăng ký hoặc **Hủy đăng ký** để rút tên."
+
     embed = discord.Embed(
         title="🎮 Đăng Ký Tham Gia FFA Match",
-        description=(
-            f"🆔 **Match ID:** #{match.id}\n"
-            f"🎯 **Số trận:** {match.count_fight}\n"
-            f"📅 **Giờ bắt đầu:** {format_vn_time(time_start)}\n"
-            f"⏰ **Check-in:** {checkin_display}\n"
-            f"🔀 **Chia lobby:** {divide_display}\n"
-            f"🗺️ **Maps:** {', '.join(map_names)}\n\n"
-            f"👥 **Đã đăng ký: {len(registered)} người**\n"
-            f"{reg_list_str}\n\n"
-            "Nhấn **Tham gia** để đăng ký hoặc **Hủy đăng ký** để rút tên."
-        ),
+        description=body,
         color=discord.Color.blue(),
     )
     return embed
 
 
-def build_checkin_embed(match, p_map: dict[int, str]) -> discord.Embed:
+def build_checkin_embed(match, p_map: dict[int, str], *, ended: bool = False) -> discord.Embed:
     """Build (or rebuild) the check-in embed for *match*.
 
     Parameters
@@ -123,6 +132,9 @@ def build_checkin_embed(match, p_map: dict[int, str]) -> discord.Embed:
         A ``Match`` ORM instance.
     p_map:
         Dict mapping Discord user ID (int) → in-game name (str).
+    ended:
+        When *True*, append a notice that check-in is closed and lobby
+        division is starting, and use a grey color.
     """
     time_start = match.time_start
     registered = match.register_users_id or []
@@ -140,16 +152,22 @@ def build_checkin_embed(match, p_map: dict[int, str]) -> discord.Embed:
         or "_(chưa có ai)_"
     )
 
+    body = (
+        f"🆔 **Match ID:** #{match.id}\n"
+        f"⏰ **Thời gian check-in:** {checkin_window}\n"
+        f"👥 **Đã check-in:** {len(checked_in)}/{len(registered)}\n\n"
+        f"✅ **Danh sách check-in:**\n{checkin_list_str}"
+    )
+
+    if ended:
+        body += "\n\n🔒 **Check-in đã kết thúc. Đang tiến hành chia lobby...**"
+    else:
+        body += "\n\nNhấn **Sẵn sàng ✅** để xác nhận tham gia."
+
     embed = discord.Embed(
         title="📋 Check-in FFA Match",
-        description=(
-            f"🆔 **Match ID:** #{match.id}\n"
-            f"⏰ **Thời gian check-in:** {checkin_window}\n"
-            f"👥 **Đã check-in:** {len(checked_in)}/{len(registered)}\n\n"
-            f"✅ **Danh sách check-in:**\n{checkin_list_str}\n\n"
-            "Nhấn **Sẵn sàng ✅** để xác nhận tham gia."
-        ),
-        color=discord.Color.green(),
+        description=body,
+        color=discord.Color.dark_gray() if ended else discord.Color.green(),
     )
     embed.set_footer(text=f"Match ID: {match.id}")
     return embed
