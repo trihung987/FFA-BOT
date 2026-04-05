@@ -123,7 +123,7 @@ def build_registration_embed(match, p_map: dict[int, str], *, checkin_started: b
         body += "\n\nNhấn **Tham gia** để đăng ký hoặc **Hủy đăng ký** để rút tên."
 
     embed = discord.Embed(
-        title="🎮 Đăng Ký Tham Gia FFA Match",
+        title=f"🎮 Đăng Ký Tham Gia FFA #{match.id}",
         description=body,
         color=discord.Color.red() if cancelled else discord.Color.blue(),
     )
