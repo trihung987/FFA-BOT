@@ -428,3 +428,206 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                 "HTTP error sending view_ffa embed (requester=%s, player=%s): %s",
                 interaction.user.id, player.id, exc,
             )
+
+    # ── Admin: test full flow ─────────────────────────────────────────────────
+
+    @bot.tree.command(
+        name="test_flow",
+        description="[Admin] Test nhanh toàn bộ quy trình FFA: tạo trận → checkin → chia lobby → nhập kết quả.",
+        guild=guild_obj,
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def test_flow(interaction: discord.Interaction) -> None:
+        """[Admin] Instantly simulate the full FFA match flow for quick testing.
+
+        Creates a match with the invoking admin as the sole real player plus 7 AI
+        slots (total = 8), skipping all time-based scheduling steps, and posts
+        embeds for every stage so the admin can inspect each phase and submit
+        test results immediately.
+        """
+        from entity import Match, User, Lobby
+        from views import (
+            RegistrationView,
+            LobbyResultView,
+            build_registration_embed,
+            build_checkin_embed,
+            build_lobby_result_embed,
+            build_disabled_registration_view,
+            build_disabled_checkin_view,
+        )
+        from lobby_division import assign_civs, TIER_RECRUIT, build_lobby_display_embed
+        from config import (
+            REGISTER_CHANNEL_ID as _REG_CH,
+            CHECKIN_CHANNEL_ID as _CHECKIN_CH,
+            DIVIDE_LOBBY_CHANNEL_ID as _DIVIDE_CH,
+            RESULT_CHANNEL_ID as _RESULT_CH,
+        )
+
+        admin_id = interaction.user.id
+        await interaction.response.defer(ephemeral=True)
+
+        # ── 1. Ensure admin has a user profile ─────────────────────────────────
+        ingame_name = interaction.user.display_name
+        try:
+            with db_session_factory() as session:
+                admin_user = session.get(User, admin_id)
+                if admin_user is None:
+                    admin_user = User(
+                        id=admin_id,
+                        ingame_name=ingame_name[:64],
+                        elo=1000,
+                        ticket=0,
+                    )
+                    session.add(admin_user)
+                    session.commit()
+                else:
+                    ingame_name = admin_user.ingame_name or ingame_name
+        except Exception:
+            log.exception("test_flow: DB error ensuring user profile (user=%s)", admin_id)
+            await interaction.followup.send("❌ Lỗi DB khi kiểm tra hồ sơ người dùng.", ephemeral=True)
+            return
+
+        # ── 2. Create match ────────────────────────────────────────────────────
+        try:
+            with db_session_factory() as session:
+                match = Match(
+                    register_users_id=[admin_id],
+                    checkin_users_id=[admin_id],
+                    name_maps=["Test Map"],
+                    count_fight=1,
+                    time_start=now_vn() + timedelta(hours=2),
+                    time_reach_checkin="2h",
+                    time_reach_divide_lobby="1h",
+                    status="checkin",
+                )
+                session.add(match)
+                session.commit()
+                session.refresh(match)
+                match_id = match.id
+        except Exception:
+            log.exception("test_flow: DB error creating match (user=%s)", admin_id)
+            await interaction.followup.send("❌ Lỗi DB khi tạo match.", ephemeral=True)
+            return
+
+        p_map = {admin_id: ingame_name}
+
+        # ── 3. Post registration embed (closed – checkin already started) ──────
+        reg_channel = interaction.client.get_channel(_REG_CH) if _REG_CH else None
+        if reg_channel:
+            try:
+                with db_session_factory() as session:
+                    db_match = session.get(Match, match_id)
+                    reg_embed = build_registration_embed(db_match, p_map, checkin_started=True)
+                reg_msg = await reg_channel.send(embed=reg_embed, view=build_disabled_registration_view())
+                with db_session_factory() as session:
+                    db_match = session.get(Match, match_id)
+                    if db_match:
+                        db_match.register_message_id = reg_msg.id
+                        session.commit()
+            except Exception:
+                log.exception("test_flow: failed to send registration embed (match=%s)", match_id)
+
+        # ── 4. Post checkin embed (closed – lobby division about to start) ─────
+        checkin_channel = interaction.client.get_channel(_CHECKIN_CH) if _CHECKIN_CH else None
+        if checkin_channel:
+            try:
+                with db_session_factory() as session:
+                    db_match = session.get(Match, match_id)
+                    checkin_embed = build_checkin_embed(db_match, p_map, ended=True)
+                checkin_msg = await checkin_channel.send(embed=checkin_embed, view=build_disabled_checkin_view())
+                with db_session_factory() as session:
+                    db_match = session.get(Match, match_id)
+                    if db_match:
+                        db_match.checkin_message_id = checkin_msg.id
+                        session.commit()
+            except Exception:
+                log.exception("test_flow: failed to send checkin embed (match=%s)", match_id)
+
+        # ── 5. Create lobby with 1 real player + 7 AI ─────────────────────────
+        ai_count = 7
+        all_civ_keys = [str(admin_id)] + [f"AI_{i}" for i in range(1, ai_count + 1)]
+        try:
+            civs = assign_civs(all_civ_keys, 1)
+        except (ValueError, Exception):
+            log.exception("test_flow: civ assignment failed (match=%s)", match_id)
+            civs = {}
+
+        try:
+            with db_session_factory() as session:
+                lobby = Lobby(
+                    match_id=match_id,
+                    tier=TIER_RECRUIT,
+                    lobby_number=1,
+                    users_list=[admin_id],
+                    ai_count=ai_count,
+                    civs=civs,
+                    scores={},
+                    status="active",
+                    voice_channel_ids=[],
+                    text_channel_ids=[],
+                )
+                session.add(lobby)
+                session.commit()
+                session.refresh(lobby)
+                lobby_id = lobby.id
+        except Exception:
+            log.exception("test_flow: DB error creating lobby (match=%s)", match_id)
+            await interaction.followup.send("❌ Lỗi DB khi tạo lobby.", ephemeral=True)
+            return
+
+        # Update match status to dividing
+        try:
+            with db_session_factory() as session:
+                db_match = session.get(Match, match_id)
+                if db_match:
+                    db_match.status = "dividing"
+                    session.commit()
+        except Exception:
+            log.exception("test_flow: DB error updating match status (match=%s)", match_id)
+
+        # ── 6. Post lobby display embed ────────────────────────────────────────
+        divide_channel = interaction.client.get_channel(_DIVIDE_CH) if _DIVIDE_CH else None
+        if divide_channel:
+            try:
+                with db_session_factory() as session:
+                    db_lobby = session.get(Lobby, lobby_id)
+                    db_match = session.get(Match, match_id)
+                    if db_lobby and db_match:
+                        display_embed = build_lobby_display_embed(db_lobby, db_match, p_map)
+                await divide_channel.send(embed=display_embed)
+            except Exception:
+                log.exception("test_flow: failed to send lobby display embed (lobby=%s)", lobby_id)
+
+        # ── 7. Post result entry embed with interactive buttons ────────────────
+        result_channel = interaction.client.get_channel(_RESULT_CH) if _RESULT_CH else None
+        if result_channel:
+            try:
+                with db_session_factory() as session:
+                    db_lobby = session.get(Lobby, lobby_id)
+                    db_match = session.get(Match, match_id)
+                    if db_lobby and db_match:
+                        result_embed = build_lobby_result_embed(db_lobby, db_match)
+                result_view = LobbyResultView(
+                    lobby_id=lobby_id,
+                    count_fight=1,
+                    map_names=["Test Map"],
+                    db_session_factory=db_session_factory,
+                )
+                result_msg = await result_channel.send(embed=result_embed, view=result_view)
+                with db_session_factory() as session:
+                    db_lobby = session.get(Lobby, lobby_id)
+                    if db_lobby:
+                        db_lobby.result_message_id = result_msg.id
+                        session.commit()
+            except Exception:
+                log.exception("test_flow: failed to send result embed (lobby=%s)", lobby_id)
+
+        await interaction.followup.send(
+            f"✅ **Test Flow hoàn tất!**\n"
+            f"• Match ID: **#{match_id}**\n"
+            f"• Người chơi thật: {interaction.user.mention} (in-game: **{ingame_name}**)\n"
+            f"• AI slots: **7**\n"
+            f"• Lobby **{TIER_RECRUIT} #1** đã được tạo.\n"
+            f"• Vào kênh kết quả để nhập điểm và test nút **Chốt Kết Quả ✅**.",
+            ephemeral=True,
+        )
