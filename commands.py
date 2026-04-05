@@ -455,7 +455,13 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             build_disabled_registration_view,
             build_disabled_checkin_view,
         )
-        from lobby_division import assign_civs, TIER_RECRUIT, build_lobby_display_embed
+        from lobby_division import (
+            assign_civs,
+            TIER_RECRUIT,
+            build_lobby_display_embed,
+            _build_emoji_map,
+            _resolve_emoji_str,
+        )
         from config import (
             REGISTER_CHANNEL_ID as _REG_CH,
             CHECKIN_CHANNEL_ID as _CHECKIN_CH,
@@ -551,6 +557,15 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         except (ValueError, Exception):
             log.exception("test_flow: civ assignment failed (match=%s)", match_id)
             civs = {}
+
+        # Resolve :name: emoji strings → <:name:id> using guild's custom emojis
+        if interaction.guild:
+            emoji_map = _build_emoji_map(interaction.guild)
+            if emoji_map:
+                civs = {
+                    key: [_resolve_emoji_str(c, emoji_map) for c in civ_list]
+                    for key, civ_list in civs.items()
+                }
 
         try:
             with db_session_factory() as session:
@@ -676,7 +691,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             )
             return
 
-        lines = [f"{e}  →  `{'<a' if e.animated else '<'}:{e.name}:{e.id}>`" for e in matches[:25]]
+        lines = [f"{e}  →  `{e}`" for e in matches[:25]]
         embed = discord.Embed(
             title=f"🔎 Kết Quả Tìm Emoji — \"{name}\"",
             description="\n".join(lines),
@@ -708,7 +723,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         pages = [emojis[i:i + page_size] for i in range(0, len(emojis), page_size)]
         embeds = []
         for idx, page in enumerate(pages, start=1):
-            lines = [f"{e}  `{'<a' if e.animated else '<'}:{e.name}:{e.id}>`" for e in page]
+            lines = [f"{e}  `{e}`" for e in page]
             embed = discord.Embed(
                 title=f"😀 Danh Sách Emoji Server ({len(emojis)} emoji)",
                 description="\n".join(lines),
