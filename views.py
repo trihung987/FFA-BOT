@@ -604,24 +604,37 @@ class CheckInView(discord.ui.View):
 # ── Result-entry embed builder ────────────────────────────────────────────────
 
 
-def build_lobby_result_embed(lobby, match) -> discord.Embed:
+def build_lobby_result_embed(lobby, match, p_map: dict[int, str] | None = None) -> discord.Embed:
     """Build the result-entry embed posted in the result channel (one per lobby).
 
     ``lobby`` and ``match`` may be plain snapshot objects or ORM instances –
     only attribute access is used.
+
+    Parameters
+    ----------
+    p_map:
+        Optional dict mapping Discord user ID (int) → in-game name (str).
+        When provided, score lines display the in-game name instead of a @mention.
     """
     from lobby_division import TIER_EMOJI
 
     tier: str = lobby.tier or ""
     emoji = TIER_EMOJI.get(tier, "🎮")
-    title = f"{emoji} Nhập Kết Quả – Lobby {tier} #{lobby.lobby_number}"
+
+    status = lobby.status or "active"
+    if status == "finished":
+        title = f"{emoji} Kết Quả – Lobby {tier} #{lobby.lobby_number}"
+    elif status == "cancelled":
+        title = f"{emoji} Đã Hủy Kết Quả – Lobby {tier} #{lobby.lobby_number}"
+    else:
+        title = f"{emoji} Nhập Kết Quả – Lobby {tier} #{lobby.lobby_number}"
 
     status_labels = {
         "active": "🟢 Đang diễn ra",
         "cancelled": "🔴 Đã hủy",
         "finished": "✅ Đã kết thúc",
     }
-    status_str = status_labels.get(lobby.status or "active", lobby.status or "active")
+    status_str = status_labels.get(status, status)
 
     map_names: list = match.name_maps or []
     count_fight: int = match.count_fight
@@ -642,17 +655,24 @@ def build_lobby_result_embed(lobby, match) -> discord.Embed:
         if fight_scores:
             score_lines = []
             for uid, score in fight_scores.items():
-                mention = f"<@{uid}>" if uid.isdigit() else uid
-                score_lines.append(f"  • {mention}: **{score}**")
+                if uid.isdigit() and p_map is not None:
+                    name = p_map.get(int(uid), f"<@{uid}>")
+                elif uid.isdigit():
+                    name = f"<@{uid}>"
+                else:
+                    name = uid  # AI slot
+                score_lines.append(f"  • {name}: **{score}**")
             lines.append(f"⚔️ **Trận {i} ({map_name}):**\n" + "\n".join(score_lines))
         else:
             lines.append(f"⚔️ **Trận {i} ({map_name}):** _(chưa có kết quả)_")
 
-    color = (
-        discord.Color.orange()
-        if (lobby.status or "active") == "active"
-        else discord.Color.dark_gray()
-    )
+    if status == "finished":
+        color = discord.Color.green()
+    elif status == "cancelled":
+        color = discord.Color.red()
+    else:
+        color = discord.Color.orange()
+
     embed = discord.Embed(
         title=title,
         description="\n".join(lines),
@@ -818,7 +838,8 @@ class ScoreModal(discord.ui.Modal):
                         lobby = session.get(Lobby, self.lobby_id)
                         match = session.get(Match, match_id)
                         if lobby and match:
-                            new_embed = build_lobby_result_embed(lobby, match)
+                            _p_map = _load_player_map(session, lobby.users_list or [])
+                            new_embed = build_lobby_result_embed(lobby, match, _p_map)
                     if new_embed:
                         await msg.edit(embed=new_embed)
                 except discord.NotFound as exc:
@@ -1043,7 +1064,9 @@ class LobbyResultView(discord.ui.View):
                     match.end_time = now_vn()
                     session.commit()
 
-                new_embed = build_lobby_result_embed(lobby, match) if match else None
+                _uids = lobby.users_list or []
+                _p_map = _load_player_map(session, _uids)
+                new_embed = build_lobby_result_embed(lobby, match, _p_map) if match else None
         except Exception as exc:
             log.exception(
                 "DB error in _cancel_lobby (lobby=%s, user=%s)",
@@ -1057,12 +1080,9 @@ class LobbyResultView(discord.ui.View):
             return
 
         if new_embed:
-            # Disable all buttons
-            for item in self.children:
-                item.disabled = True
             await _safe_edit(
                 interaction, f"LobbyResultView._cancel_lobby lobby={self.lobby_id}",
-                embed=new_embed, view=self,
+                embed=new_embed, view=discord.ui.View(),
             )
         else:
             await _safe_send(
@@ -1126,7 +1146,9 @@ class LobbyResultView(discord.ui.View):
                     match.end_time = now_vn()
                     session.commit()
 
-                new_embed = build_lobby_result_embed(lobby, match) if match else None
+                _uids = lobby.users_list or []
+                _p_map = _load_player_map(session, _uids)
+                new_embed = build_lobby_result_embed(lobby, match, _p_map) if match else None
         except Exception as exc:
             log.exception(
                 "DB error in _finalize_lobby (lobby=%s, user=%s)",
@@ -1140,11 +1162,9 @@ class LobbyResultView(discord.ui.View):
             return
 
         if new_embed:
-            for item in self.children:
-                item.disabled = True
             await _safe_edit(
                 interaction, f"LobbyResultView._finalize_lobby lobby={self.lobby_id}",
-                embed=new_embed, view=self,
+                embed=new_embed, view=discord.ui.View(),
             )
         else:
             await _safe_send(
