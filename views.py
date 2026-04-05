@@ -102,9 +102,9 @@ def build_registration_embed(match, p_map: dict[int, str], *, checkin_started: b
     body = (
         f"🆔 **Match ID:** #{match.id}\n"
         f"🎯 **Số trận:** {match.count_fight}\n"
-        f"📅 **Giờ bắt đầu:** {format_vn_time(time_start)}\n"
         f"⏰ **Check-in:** {checkin_display}\n"
         f"🔀 **Chia lobby:** {divide_display}\n"
+        f"📅 **Giờ bắt đầu:** {format_vn_time(time_start)}\n"
         f"🗺️ **Maps:** {', '.join(map_names)}\n\n"
         f"👥 **Đã đăng ký: {len(registered)} người**\n"
         f"{reg_list_str}"
