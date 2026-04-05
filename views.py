@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from config import SHOWMATCH_ROLE_ID as _SHOWMATCH_ROLE_ID
+from config import SHOWMATCH_ROLE_ID as _SHOWMATCH_ROLE_ID, MIN_PLAYERS_REQUIRED as _MIN_PLAYERS_REQUIRED
 from helpers import format_vn_time, now_vn, parse_duration
 
 if TYPE_CHECKING:
@@ -61,7 +61,7 @@ def _load_player_map(session, user_ids: list[int]) -> dict[int, str]:
     return {u.id: (u.ingame_name or "Unknown") for u in users}
 
 
-def build_registration_embed(match, p_map: dict[int, str], *, checkin_started: bool = False) -> discord.Embed:
+def build_registration_embed(match, p_map: dict[int, str], *, checkin_started: bool = False, cancelled: bool = False) -> discord.Embed:
     """Build (or rebuild) the registration embed for *match*.
 
     Parameters
@@ -74,6 +74,8 @@ def build_registration_embed(match, p_map: dict[int, str], *, checkin_started: b
     checkin_started:
         When *True*, append a notice that check-in is now open and registration
         is closed.
+    cancelled:
+        When *True*, append a cancellation notice and use a red embed color.
     """
     time_start = match.time_start
 
@@ -102,15 +104,20 @@ def build_registration_embed(match, p_map: dict[int, str], *, checkin_started: b
     body = (
         f"🆔 **Match ID:** #{match.id}\n"
         f"🎯 **Số trận:** {match.count_fight}\n"
-        f"📅 **Giờ bắt đầu:** {format_vn_time(time_start)}\n"
         f"⏰ **Check-in:** {checkin_display}\n"
         f"🔀 **Chia lobby:** {divide_display}\n"
+        f"📅 **Giờ bắt đầu:** {format_vn_time(time_start)}\n"
         f"🗺️ **Maps:** {', '.join(map_names)}\n\n"
         f"👥 **Đã đăng ký: {len(registered)} người**\n"
         f"{reg_list_str}"
     )
 
-    if checkin_started:
+    if cancelled:
+        body += (
+            f"\n\n❌ **Match đã bị hủy vì không đủ người đăng ký "
+            f"({len(registered)}/{_MIN_PLAYERS_REQUIRED} người tối thiểu).**"
+        )
+    elif checkin_started:
         body += "\n\n⏰ **Đã đến giờ check-in! Đăng ký đã đóng.**"
     else:
         body += "\n\nNhấn **Tham gia** để đăng ký hoặc **Hủy đăng ký** để rút tên."
@@ -118,12 +125,12 @@ def build_registration_embed(match, p_map: dict[int, str], *, checkin_started: b
     embed = discord.Embed(
         title="🎮 Đăng Ký Tham Gia FFA Match",
         description=body,
-        color=discord.Color.blue(),
+        color=discord.Color.red() if cancelled else discord.Color.blue(),
     )
     return embed
 
 
-def build_checkin_embed(match, p_map: dict[int, str], *, ended: bool = False) -> discord.Embed:
+def build_checkin_embed(match, p_map: dict[int, str], *, ended: bool = False, cancelled: bool = False) -> discord.Embed:
     """Build (or rebuild) the check-in embed for *match*.
 
     Parameters
@@ -135,6 +142,8 @@ def build_checkin_embed(match, p_map: dict[int, str], *, ended: bool = False) ->
     ended:
         When *True*, append a notice that check-in is closed and lobby
         division is starting, and use a grey color.
+    cancelled:
+        When *True*, append a cancellation notice and use a red embed color.
     """
     time_start = match.time_start
     registered = match.register_users_id or []
@@ -159,7 +168,12 @@ def build_checkin_embed(match, p_map: dict[int, str], *, ended: bool = False) ->
         f"✅ **Danh sách check-in:**\n{checkin_list_str}"
     )
 
-    if ended:
+    if cancelled:
+        body += (
+            f"\n\n❌ **Match đã bị hủy vì không đủ người check-in tối thiểu "
+            f"({len(checked_in)}/{_MIN_PLAYERS_REQUIRED} người tối thiểu).**"
+        )
+    elif ended:
         body += "\n\n🔒 **Check-in đã kết thúc. Đang tiến hành chia lobby...**"
     else:
         body += "\n\nNhấn **Sẵn sàng ✅** để xác nhận tham gia."
@@ -167,7 +181,7 @@ def build_checkin_embed(match, p_map: dict[int, str], *, ended: bool = False) ->
     embed = discord.Embed(
         title="📋 Check-in FFA Match",
         description=body,
-        color=discord.Color.dark_gray() if ended else discord.Color.green(),
+        color=discord.Color.red() if cancelled else (discord.Color.dark_gray() if ended else discord.Color.green()),
     )
     embed.set_footer(text=f"Match ID: {match.id}")
     return embed
@@ -334,6 +348,27 @@ class MapNamesModal(discord.ui.Modal):
 
 
 # ── View: registration embed with Join / Cancel buttons ───────────────────────
+
+
+def build_disabled_registration_view() -> discord.ui.View:
+    """Return a view with the registration buttons (Join/Cancel) disabled."""
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(
+        label="Tham gia", style=discord.ButtonStyle.success, emoji="✅", disabled=True,
+    ))
+    view.add_item(discord.ui.Button(
+        label="Hủy đăng ký", style=discord.ButtonStyle.danger, emoji="❌", disabled=True,
+    ))
+    return view
+
+
+def build_disabled_checkin_view() -> discord.ui.View:
+    """Return a view with the check-in button (Sẵn sàng ✅) disabled."""
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(
+        label="Sẵn sàng ✅", style=discord.ButtonStyle.primary, disabled=True,
+    ))
+    return view
 
 
 class RegistrationView(discord.ui.View):

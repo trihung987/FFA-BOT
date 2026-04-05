@@ -106,15 +106,17 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
 
                 # --- Not enough players: cancel the match ---
                 if len(registered) < MIN_PLAYERS_REQUIRED:
-                    # Reply to the registration message with a cancellation notice
+                    # Edit the registration embed to show the cancellation notice with disabled buttons
                     if register_channel and reg_msg_id:
                         try:
+                            from views import build_registration_embed, _load_player_map, build_disabled_registration_view
+
                             reg_msg = await register_channel.fetch_message(reg_msg_id)
-                            await reg_msg.reply(
-                                f"❌ **Match #{match.id} đã bị hủy** vì không đủ người đăng ký "
-                                f"(**{len(registered)}/{MIN_PLAYERS_REQUIRED}** người tối thiểu)."
-                            )
-                            await reg_msg.edit(view=discord.ui.View())
+                            with db_session_factory() as session:
+                                db_match = session.get(Match, match.id)
+                                p_map = _load_player_map(session, registered)
+                                cancelled_embed = build_registration_embed(db_match, p_map, cancelled=True)
+                            await reg_msg.edit(embed=cancelled_embed, view=build_disabled_registration_view())
                         except discord.NotFound:
                             log.debug(
                                 "match_scheduler: register message %s for match #%s not found",
@@ -146,14 +148,14 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 # 1. Edit registration message: disable buttons + add "check-in started" notice
                 if register_channel and reg_msg_id:
                     try:
-                        from views import build_registration_embed, _load_player_map
+                        from views import build_registration_embed, _load_player_map, build_disabled_registration_view
 
                         reg_msg = await register_channel.fetch_message(reg_msg_id)
                         with db_session_factory() as session:
                             db_match = session.get(Match, match.id)
                             p_map = _load_player_map(session, registered)
                             reg_embed = build_registration_embed(db_match, p_map, checkin_started=True)
-                        await reg_msg.edit(embed=reg_embed, view=discord.ui.View())
+                        await reg_msg.edit(embed=reg_embed, view=build_disabled_registration_view())
                     except discord.NotFound:
                         log.debug(
                             "match_scheduler: register message %s for match #%s not found",
@@ -296,11 +298,11 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 if snap is None:
                     continue
 
-                # 1. Edit check-in message: disable button + show "ended" notice
+                # 1. Edit check-in message: disable button + show "ended" or "cancelled" notice
                 checkin_channel = bot.get_channel(CHECKIN_CHANNEL_ID)
                 if checkin_channel and snap.checkin_message_id:
                     try:
-                        from views import build_checkin_embed, _load_player_map
+                        from views import build_checkin_embed, _load_player_map, build_disabled_checkin_view
 
                         checkin_msg_obj = await checkin_channel.fetch_message(snap.checkin_message_id)
                         with db_session_factory() as session:
@@ -309,8 +311,12 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                                 set((db_match.register_users_id or []) + (db_match.checkin_users_id or []))
                             ) if db_match else []
                             p_map = _load_player_map(session, all_ids)
-                            ended_embed = build_checkin_embed(db_match, p_map, ended=True)
-                        await checkin_msg_obj.edit(embed=ended_embed, view=discord.ui.View())
+                            checkin_count = len(db_match.checkin_users_id or []) if db_match else 0
+                            if checkin_count < MIN_PLAYERS_REQUIRED:
+                                closed_embed = build_checkin_embed(db_match, p_map, cancelled=True)
+                            else:
+                                closed_embed = build_checkin_embed(db_match, p_map, ended=True)
+                        await checkin_msg_obj.edit(embed=closed_embed, view=build_disabled_checkin_view())
                     except discord.NotFound:
                         log.debug(
                             "match_scheduler: check-in message %s for match #%s not found",
