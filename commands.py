@@ -650,3 +650,83 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         embed.add_field(name="Chuỗi gốc (raw)", value=f"`{discord.utils.escape_markdown(text)}`", inline=False)
         embed.set_footer(text=f"Yêu cầu bởi {interaction.user.display_name}")
         await _safe_send(interaction, "emojitest", embed=embed)
+
+    # ── Emoji find ────────────────────────────────────────────────────────────
+
+    @bot.tree.command(
+        name="emojifind",
+        description="Tìm emoji custom theo tên trong server và hiển thị mã của nó.",
+        guild=guild_obj,
+    )
+    @app_commands.describe(name="Tên emoji cần tìm (không cần dấu ngoặc hay dấu hai chấm)")
+    async def emojifind(interaction: discord.Interaction, name: str) -> None:
+        """Search the guild's custom emojis by name and return their codes."""
+        if interaction.guild is None:
+            await _safe_send(interaction, "emojifind", "❌ Lệnh này chỉ dùng được trong server.", ephemeral=True)
+            return
+
+        query = name.lower().strip()
+        matches = [e for e in interaction.guild.emojis if query in e.name.lower()]
+
+        if not matches:
+            await _safe_send(
+                interaction, "emojifind",
+                f"❌ Không tìm thấy emoji nào chứa tên **{discord.utils.escape_markdown(name)}** trong server.",
+                ephemeral=True,
+            )
+            return
+
+        lines = [f"{e}  →  `{'<a' if e.animated else '<'}:{e.name}:{e.id}>`" for e in matches[:25]]
+        embed = discord.Embed(
+            title=f"🔎 Kết Quả Tìm Emoji — \"{name}\"",
+            description="\n".join(lines),
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text=f"Tìm thấy {len(matches)} kết quả{' (hiển thị 25 đầu tiên)' if len(matches) > 25 else ''}")
+        await _safe_send(interaction, "emojifind", embed=embed)
+
+    # ── Emoji list ────────────────────────────────────────────────────────────
+
+    @bot.tree.command(
+        name="emojilist",
+        description="Liệt kê toàn bộ emoji custom của server kèm mã sử dụng.",
+        guild=guild_obj,
+    )
+    async def emojilist(interaction: discord.Interaction) -> None:
+        """List all custom emojis in the guild with their raw codes."""
+        if interaction.guild is None:
+            await _safe_send(interaction, "emojilist", "❌ Lệnh này chỉ dùng được trong server.", ephemeral=True)
+            return
+
+        emojis = interaction.guild.emojis
+        if not emojis:
+            await _safe_send(interaction, "emojilist", "ℹ️ Server chưa có emoji custom nào.", ephemeral=True)
+            return
+
+        # Split into pages of 20 to stay within embed limits
+        page_size = 20
+        pages = [emojis[i:i + page_size] for i in range(0, len(emojis), page_size)]
+        embeds = []
+        for idx, page in enumerate(pages, start=1):
+            lines = [f"{e}  `{'<a' if e.animated else '<'}:{e.name}:{e.id}>`" for e in page]
+            embed = discord.Embed(
+                title=f"😀 Danh Sách Emoji Server ({len(emojis)} emoji)",
+                description="\n".join(lines),
+                color=discord.Color.blurple(),
+            )
+            if len(pages) > 1:
+                embed.set_footer(text=f"Trang {idx}/{len(pages)}")
+            embeds.append(embed)
+
+        # Send first embed as the response, remaining as follow-ups
+        try:
+            await interaction.response.send_message(embed=embeds[0])
+            for extra_embed in embeds[1:]:
+                await interaction.followup.send(embed=extra_embed)
+        except discord.NotFound as exc:
+            if exc.code == 10062:
+                log.warning("Interaction expired for emojilist (user=%s)", interaction.user.id)
+            else:
+                log.error("NotFound in emojilist (user=%s): %s", interaction.user.id, exc)
+        except discord.HTTPException as exc:
+            log.error("HTTP error in emojilist (user=%s): %s", interaction.user.id, exc)
