@@ -11,7 +11,7 @@ from datetime import timedelta
 import discord
 from discord.ext import tasks, commands as ext_commands
 
-from config import CHECKIN_CHANNEL_ID, DIVIDE_LOBBY_CHANNEL_ID, REGISTER_CHANNEL_ID, RESULT_CHANNEL_ID
+from config import CHECKIN_CHANNEL_ID, DIVIDE_LOBBY_CHANNEL_ID, REGISTER_CHANNEL_ID, RESULT_CHANNEL_ID, MIN_PLAYERS_REQUIRED
 from entity import Match, User
 from helpers import now_vn, format_vn_time, parse_duration
 
@@ -29,9 +29,6 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
 
     The caller is responsible for starting / stopping all loops.
     """
-
-    # Minimum registered players required to proceed with a match
-    _MIN_PLAYERS = 6
 
     @tasks.loop(minutes=1)
     async def match_scheduler() -> None:
@@ -108,14 +105,14 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 register_channel = bot.get_channel(REGISTER_CHANNEL_ID)
 
                 # --- Not enough players: cancel the match ---
-                if len(registered) < _MIN_PLAYERS:
+                if len(registered) < MIN_PLAYERS_REQUIRED:
                     # Reply to the registration message with a cancellation notice
                     if register_channel and reg_msg_id:
                         try:
                             reg_msg = await register_channel.fetch_message(reg_msg_id)
                             await reg_msg.reply(
                                 f"❌ **Match #{match.id} đã bị hủy** vì không đủ người đăng ký "
-                                f"(**{len(registered)}/{_MIN_PLAYERS}** người tối thiểu)."
+                                f"(**{len(registered)}/{MIN_PLAYERS_REQUIRED}** người tối thiểu)."
                             )
                             await reg_msg.edit(view=discord.ui.View())
                         except discord.NotFound:
