@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
+from config import SHOWMATCH_ROLE_ID as _SHOWMATCH_ROLE_ID
 from helpers import format_vn_time, now_vn, parse_duration
 
 if TYPE_CHECKING:
@@ -76,7 +77,7 @@ def build_registration_embed(match, p_map: dict[int, str]) -> discord.Embed:
     try:
         divide_open_dt = time_start - parse_duration(match.time_reach_divide_lobby)
         divide_display = format_vn_time(divide_open_dt)
-    except ValueError:
+    except (ValueError, AttributeError):
         divide_open_dt = None
         divide_display = "N/A"
 
@@ -272,11 +273,9 @@ class MapNamesModal(discord.ui.Modal):
             return
 
         view = RegistrationView(match_id=match_id, db_session_factory=self.db_session_factory)
-        from config import SHOWMATCH_ROLE_ID
-
-        role_mention = f"<@&{SHOWMATCH_ROLE_ID}>" if SHOWMATCH_ROLE_ID else ""
+        role_mention = f"<@&{_SHOWMATCH_ROLE_ID}>" if _SHOWMATCH_ROLE_ID else None
         try:
-            reg_msg = await self.register_channel.send(content=role_mention or None, embed=embed, view=view)
+            reg_msg = await self.register_channel.send(content=role_mention, embed=embed, view=view)
         except discord.HTTPException as exc:
             log.exception(
                 "Failed to send registration message for match #%s (user=%s)",
@@ -509,7 +508,10 @@ class CheckInView(discord.ui.View):
                         )
                         return
                 except ValueError:
-                    pass  # If duration parsing fails, allow check-in (fail-open)
+                    log.warning(
+                        "CheckInView.ready: could not parse check-in window for match #%s – allowing check-in",
+                        self.match_id,
+                    )
 
                 checked_in: list = (match.checkin_users_id or []).copy()
                 if user_id in checked_in:
