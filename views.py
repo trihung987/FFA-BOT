@@ -663,7 +663,7 @@ def build_lobby_result_embed(lobby, match, p_map: dict[int, str] | None = None) 
                 else:
                     name = uid  # AI slot
                 # Append the civ emoji for this fight alongside the player name
-                user_civs = civs_dict.get(uid, [])
+                user_civs = civs_dict.get(str(uid), [])
                 civ_str = user_civs[i - 1] if i - 1 < len(user_civs) else ""
                 display = f"{name} {civ_str}" if civ_str else name
                 score_lines.append(f"  • {display}: **{score}**")
