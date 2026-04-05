@@ -111,6 +111,9 @@ def assign_civs(all_keys: list[str], count_fight: int) -> dict[str, list[str]]:
 
 # ── Embed builders ─────────────────────────────────────────────────────────────
 
+_MAX_INGAME_NAME_LEN = 15
+
+
 def build_lobby_display_embed(
     lobby,
     match,
@@ -118,40 +121,56 @@ def build_lobby_display_embed(
 ) -> discord.Embed:
     """Build the public display embed that shows players and their civ assignments.
 
-    Format (per the spec)::
+    Format (one line per player)::
 
-        Lobby tier #N
-        Người chơi | Tên in-game | Trận 1 | … | Trận N
-        @mention   | ingame_name | <emoji_civ> | … | <emoji_civ>
+        Match #N | Lobby tier #N
+        `Name           ` T1  T2  …
+        `PlayerIngame   ` 🎮  🏹  …
         …
-        AI         | —           | <emoji_civ> | …
+        `AI             ` 🎭  …
+
+    Player names are padded to equal width (truncated to ``_MAX_INGAME_NAME_LEN``
+    characters) using inline code spans so Discord renders them in monospace,
+    keeping the civ-emoji columns aligned.
     """
     tier = lobby.tier
     emoji = TIER_EMOJI.get(tier, "🎮")
-    title = f"{emoji} Lobby {tier} #{lobby.lobby_number}"
+    title = f"{emoji} Match #{match.id} | Lobby {tier} #{lobby.lobby_number}"
 
     count_fight: int = match.count_fight
     civs: dict = lobby.civs or {}
     users_list: list = lobby.users_list or []
     ai_count: int = lobby.ai_count or 0
 
-    # Header
-    header_parts = ["**Người chơi**", "**Tên in-game**"]
-    header_parts += [f"**Trận {i}**" for i in range(1, count_fight + 1)]
-    header = " | ".join(header_parts)
+    def _truncate(name: str) -> str:
+        if len(name) > _MAX_INGAME_NAME_LEN:
+            return name[:_MAX_INGAME_NAME_LEN - 1] + "…"
+        return name
+
+    # Compute display names and the column width needed
+    display_names: dict[int, str] = {uid: _truncate(p_map.get(uid, "Unknown")) for uid in users_list}
+    all_name_lens = [len(n) for n in display_names.values()]
+    if ai_count > 0:
+        all_name_lens.append(len("AI"))
+    col_width = max(all_name_lens, default=4)
+
+    # Build header row: padded label + fight column labels
+    fight_cols = "  ".join(f"T{i}" for i in range(1, count_fight + 1))
+    header = f"`{'Tên'.ljust(col_width)}` {fight_cols}"
 
     rows = [header]
     for uid in users_list:
-        ingame = p_map.get(uid, "Unknown")
+        name_padded = display_names[uid].ljust(col_width)
         player_civs = civs.get(str(uid), [])
-        civ_cols = " | ".join(player_civs) if player_civs else "—"
-        rows.append(f"<@{uid}> | `{ingame}` | {civ_cols}")
+        civ_str = "  ".join(player_civs) if player_civs else "—"
+        rows.append(f"`{name_padded}` {civ_str}")
 
     for i in range(1, ai_count + 1):
         ai_key = f"AI_{i}"
+        name_padded = "AI".ljust(col_width)
         player_civs = civs.get(ai_key, [])
-        civ_cols = " | ".join(player_civs) if player_civs else "—"
-        rows.append(f"**AI** | — | {civ_cols}")
+        civ_str = "  ".join(player_civs) if player_civs else "—"
+        rows.append(f"`{name_padded}` {civ_str}")
 
     description = "\n".join(rows)
 
@@ -160,7 +179,7 @@ def build_lobby_display_embed(
         description=description,
         color=discord.Color.gold(),
     )
-    embed.set_footer(text=f"Match #{match.id} | Lobby #{lobby.id}")
+    embed.set_footer(text=f"Match #{match.id} | ID lobby #{lobby.id}")
     return embed
 
 
@@ -540,14 +559,15 @@ async def divide_lobbies(
             lobby_snap = _LobbySnapshot(db_lobby)
             match_snap = _MatchSnapshot(db_match)
 
-        # Send display embed to announce channel
+        # Send display embed to announce channel (with player @mentions above the embed)
         if announce_channel:
             display_embed = build_lobby_display_embed(lobby_snap, match_snap, p_map)
-            await announce_channel.send(embed=display_embed)
+            mentions = " ".join(f"<@{uid}>" for uid in (lobby_snap.users_list or []))
+            await announce_channel.send(content=mentions or None, embed=display_embed)
 
         # Send result-entry embed + buttons to result channel
         if result_channel:
-            result_embed = build_lobby_result_embed(lobby_snap, match_snap)
+            result_embed = build_lobby_result_embed(lobby_snap, match_snap, p_map)
             view = LobbyResultView(
                 lobby_id=lobby_id,
                 count_fight=match.count_fight,
