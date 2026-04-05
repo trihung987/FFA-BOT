@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from helpers import format_vn_time, parse_duration
+from helpers import format_vn_time, now_vn, parse_duration
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -74,16 +74,18 @@ def build_registration_embed(match, p_map: dict[int, str]) -> discord.Embed:
     time_start = match.time_start
 
     try:
-        checkin_open_dt = time_start - parse_duration(match.time_reach_checkin)
-        checkin_display = f"{format_vn_time(checkin_open_dt)} → {format_vn_time(time_start)}"
+        divide_open_dt = time_start - parse_duration(match.time_reach_divide_lobby)
+        divide_display = format_vn_time(divide_open_dt)
     except ValueError:
-        checkin_display = "N/A"
+        divide_open_dt = None
+        divide_display = "N/A"
 
     try:
-        divide_open_dt = time_start - parse_duration(match.time_reach_divide_lobby)
-        divide_display = f"{format_vn_time(divide_open_dt)} → {format_vn_time(time_start)}"
+        checkin_open_dt = time_start - parse_duration(match.time_reach_checkin)
+        checkin_end_dt = divide_open_dt if divide_open_dt is not None else time_start
+        checkin_display = f"{format_vn_time(checkin_open_dt)} → {format_vn_time(checkin_end_dt)}"
     except ValueError:
-        divide_display = "N/A"
+        checkin_display = "N/A"
 
     registered = match.register_users_id or []
     map_names = match.name_maps or []
@@ -125,6 +127,13 @@ def build_checkin_embed(match, p_map: dict[int, str]) -> discord.Embed:
     registered = match.register_users_id or []
     checked_in = match.checkin_users_id or []
 
+    try:
+        checkin_open_dt = time_start - parse_duration(match.time_reach_checkin)
+        divide_dt = time_start - parse_duration(match.time_reach_divide_lobby)
+        checkin_window = f"{format_vn_time(checkin_open_dt)} → {format_vn_time(divide_dt)}"
+    except (ValueError, AttributeError):
+        checkin_window = "N/A"
+
     checkin_list_str = (
         "\n".join(f"- {p_map.get(u, 'Unknown')} ✅" for u in checked_in)
         or "_(chưa có ai)_"
@@ -134,7 +143,7 @@ def build_checkin_embed(match, p_map: dict[int, str]) -> discord.Embed:
         title="📋 Check-in FFA Match",
         description=(
             f"🆔 **Match ID:** #{match.id}\n"
-            f"⏰ **Giờ kết thúc check-in:** {format_vn_time(time_start)}\n"
+            f"⏰ **Thời gian check-in:** {checkin_window}\n"
             f"👥 **Đã check-in:** {len(checked_in)}/{len(registered)}\n\n"
             f"✅ **Danh sách check-in:**\n{checkin_list_str}\n\n"
             "Nhấn **Sẵn sàng ✅** để xác nhận tham gia."
@@ -263,8 +272,11 @@ class MapNamesModal(discord.ui.Modal):
             return
 
         view = RegistrationView(match_id=match_id, db_session_factory=self.db_session_factory)
+        from config import SHOWMATCH_ROLE_ID
+
+        role_mention = f"<@&{SHOWMATCH_ROLE_ID}>" if SHOWMATCH_ROLE_ID else ""
         try:
-            reg_msg = await self.register_channel.send(embed=embed, view=view)
+            reg_msg = await self.register_channel.send(content=role_mention or None, embed=embed, view=view)
         except discord.HTTPException as exc:
             log.exception(
                 "Failed to send registration message for match #%s (user=%s)",
@@ -476,6 +488,28 @@ class CheckInView(discord.ui.View):
                         "⚠️ Bạn chưa đăng ký tham gia match này!", ephemeral=True,
                     )
                     return
+
+                # Validate that the current time is within the check-in window
+                try:
+                    now = now_vn()
+                    checkin_open = match.time_start - parse_duration(match.time_reach_checkin)
+                    divide_time = match.time_start - parse_duration(match.time_reach_divide_lobby)
+                    if now < checkin_open:
+                        await _safe_send(
+                            interaction, f"CheckInView.ready match={self.match_id}",
+                            f"⏳ Chưa đến giờ check-in! Giờ mở check-in: {format_vn_time(checkin_open)}",
+                            ephemeral=True,
+                        )
+                        return
+                    if now >= divide_time:
+                        await _safe_send(
+                            interaction, f"CheckInView.ready match={self.match_id}",
+                            f"⌛ Đã hết thời gian check-in! Check-in kết thúc lúc: {format_vn_time(divide_time)}",
+                            ephemeral=True,
+                        )
+                        return
+                except ValueError:
+                    pass  # If duration parsing fails, allow check-in (fail-open)
 
                 checked_in: list = (match.checkin_users_id or []).copy()
                 if user_id in checked_in:
