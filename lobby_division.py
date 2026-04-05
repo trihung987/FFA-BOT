@@ -124,14 +124,13 @@ def build_lobby_display_embed(
     Format (one line per player)::
 
         Match #N | Lobby tier #N
-        `Name           ` T1  T2  …
-        `PlayerIngame   ` 🎮  🏹  …
+        **Tên**          **Trận 1**  **Trận 2**  …
+        PlayerIngame     🎮          🏹          …
         …
-        `AI             ` 🎭  …
+        AI               🎭          …
 
     Player names are padded to equal width (truncated to ``_MAX_INGAME_NAME_LEN``
-    characters) using inline code spans so Discord renders them in monospace,
-    keeping the civ-emoji columns aligned.
+    characters) to keep the civ-emoji columns roughly aligned.
     """
     tier = lobby.tier
     emoji = TIER_EMOJI.get(tier, "🎮")
@@ -154,23 +153,23 @@ def build_lobby_display_embed(
         all_name_lens.append(len("AI"))
     col_width = max(all_name_lens, default=4)
 
-    # Build header row: padded label + fight column labels
-    fight_cols = "  ".join(f"T{i}" for i in range(1, count_fight + 1))
-    header = f"`{'Tên'.ljust(col_width)}` {fight_cols}"
+    # Build header row: bold label + bold fight column labels
+    fight_cols = "  ".join(f"**Trận {i}**" for i in range(1, count_fight + 1))
+    header = f"**{'Tên'.ljust(col_width)}**  {fight_cols}"
 
     rows = [header]
     for uid in users_list:
         name_padded = display_names[uid].ljust(col_width)
         player_civs = civs.get(str(uid), [])
         civ_str = "  ".join(player_civs) if player_civs else "—"
-        rows.append(f"`{name_padded}` {civ_str}")
+        rows.append(f"{name_padded}  {civ_str}")
 
     for i in range(1, ai_count + 1):
         ai_key = f"AI_{i}"
         name_padded = "AI".ljust(col_width)
         player_civs = civs.get(ai_key, [])
         civ_str = "  ".join(player_civs) if player_civs else "—"
-        rows.append(f"`{name_padded}` {civ_str}")
+        rows.append(f"{name_padded}  {civ_str}")
 
     description = "\n".join(rows)
 
