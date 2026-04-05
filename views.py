@@ -204,7 +204,7 @@ class MapNamesModal(discord.ui.Modal):
 
         # Validate duration fields before creating the match
         try:
-            parse_duration(self.time_reach_checkin)
+            checkin_delta = parse_duration(self.time_reach_checkin)
         except ValueError:
             await _safe_send(
                 interaction, "MapNamesModal.on_submit",
@@ -215,12 +215,21 @@ class MapNamesModal(discord.ui.Modal):
             return
 
         try:
-            parse_duration(self.time_reach_divide_lobby)
+            divide_delta = parse_duration(self.time_reach_divide_lobby)
         except ValueError:
             await _safe_send(
                 interaction, "MapNamesModal.on_submit",
                 f"❌ Định dạng thời gian chia lobby không hợp lệ: {self.time_reach_divide_lobby!r}. "
                 "Vui lòng dùng: 1h hoặc 30p",
+                ephemeral=True,
+            )
+            return
+
+        if checkin_delta <= divide_delta:
+            await _safe_send(
+                interaction, "MapNamesModal.on_submit",
+                "❌ Thời gian mở check-in phải lớn hơn thời gian chia lobby. "
+                f"({self.time_reach_checkin} phải trước {self.time_reach_divide_lobby})",
                 ephemeral=True,
             )
             return
