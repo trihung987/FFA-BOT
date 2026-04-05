@@ -175,7 +175,7 @@ def _civ_short_name(civ_str: str, max_len: int = _MAX_CIV_LABEL_LEN) -> str:
     parts = full.split()
     word = parts[0] if parts else full
     if len(word) > max_len:
-        return word[: max_len - 1] + "…"
+        return word[: max_len - 3] + "..."
     return word
 
 
@@ -231,7 +231,7 @@ def build_lobby_display_embed(
             all_civ_short.append(_civ_short_name(c))
 
     # Fight column must fit the widest civ label and the widest fight header
-    fight_header_max = max(len(f"Trận {i}") for i in range(1, count_fight + 1))
+    fight_header_max = max((len(f"Trận {i}") for i in range(1, count_fight + 1)), default=6)
     civ_label_max = max((len(s) for s in all_civ_short), default=4)
     civ_col_width = max(fight_header_max, civ_label_max)
 
