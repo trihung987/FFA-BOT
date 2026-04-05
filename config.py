@@ -18,4 +18,6 @@ SHOWMATCH_ROLE_ID = int(os.getenv("SHOWMATCH_ROLE_ID", "0")) or None  # Role cáº
 JUDGE_ROLE_ID = int(os.getenv("JUDGE_ROLE_ID", "0")) or None
 # Category under which per-lobby voice/text channels are created
 LOBBY_CATEGORY_ID = int(os.getenv("LOBBY_CATEGORY_ID", "0")) or None
+# Minimum number of registered players required to start a match
+MIN_PLAYERS_REQUIRED = int(os.getenv("MIN_PLAYERS_REQUIRED", "6"))
 

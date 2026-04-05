@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from helpers import format_vn_time, parse_duration
+from config import SHOWMATCH_ROLE_ID as _SHOWMATCH_ROLE_ID
+from helpers import format_vn_time, now_vn, parse_duration
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -60,7 +61,7 @@ def _load_player_map(session, user_ids: list[int]) -> dict[int, str]:
     return {u.id: (u.ingame_name or "Unknown") for u in users}
 
 
-def build_registration_embed(match, p_map: dict[int, str]) -> discord.Embed:
+def build_registration_embed(match, p_map: dict[int, str], *, checkin_started: bool = False) -> discord.Embed:
     """Build (or rebuild) the registration embed for *match*.
 
     Parameters
@@ -70,20 +71,25 @@ def build_registration_embed(match, p_map: dict[int, str]) -> discord.Embed:
         needed attributes already loaded).
     p_map:
         Dict mapping Discord user ID (int) → in-game name (str).
+    checkin_started:
+        When *True*, append a notice that check-in is now open and registration
+        is closed.
     """
     time_start = match.time_start
 
     try:
-        checkin_open_dt = time_start - parse_duration(match.time_reach_checkin)
-        checkin_display = f"{format_vn_time(checkin_open_dt)} → {format_vn_time(time_start)}"
-    except ValueError:
-        checkin_display = "N/A"
+        divide_open_dt = time_start - parse_duration(match.time_reach_divide_lobby)
+        divide_display = format_vn_time(divide_open_dt)
+    except (ValueError, AttributeError):
+        divide_open_dt = None
+        divide_display = "N/A"
 
     try:
-        divide_open_dt = time_start - parse_duration(match.time_reach_divide_lobby)
-        divide_display = f"{format_vn_time(divide_open_dt)} → {format_vn_time(time_start)}"
+        checkin_open_dt = time_start - parse_duration(match.time_reach_checkin)
+        checkin_end_dt = divide_open_dt if divide_open_dt is not None else time_start
+        checkin_display = f"{format_vn_time(checkin_open_dt)} → {format_vn_time(checkin_end_dt)}"
     except ValueError:
-        divide_display = "N/A"
+        checkin_display = "N/A"
 
     registered = match.register_users_id or []
     map_names = match.name_maps or []
@@ -93,25 +99,31 @@ def build_registration_embed(match, p_map: dict[int, str]) -> discord.Embed:
         or "_(chưa có ai)_"
     )
 
+    body = (
+        f"🆔 **Match ID:** #{match.id}\n"
+        f"🎯 **Số trận:** {match.count_fight}\n"
+        f"📅 **Giờ bắt đầu:** {format_vn_time(time_start)}\n"
+        f"⏰ **Check-in:** {checkin_display}\n"
+        f"🔀 **Chia lobby:** {divide_display}\n"
+        f"🗺️ **Maps:** {', '.join(map_names)}\n\n"
+        f"👥 **Đã đăng ký: {len(registered)} người**\n"
+        f"{reg_list_str}"
+    )
+
+    if checkin_started:
+        body += "\n\n⏰ **Đã đến giờ check-in! Đăng ký đã đóng.**"
+    else:
+        body += "\n\nNhấn **Tham gia** để đăng ký hoặc **Hủy đăng ký** để rút tên."
+
     embed = discord.Embed(
         title="🎮 Đăng Ký Tham Gia FFA Match",
-        description=(
-            f"🆔 **Match ID:** #{match.id}\n"
-            f"🎯 **Số trận:** {match.count_fight}\n"
-            f"📅 **Giờ bắt đầu:** {format_vn_time(time_start)}\n"
-            f"⏰ **Check-in:** {checkin_display}\n"
-            f"🔀 **Chia lobby:** {divide_display}\n"
-            f"🗺️ **Maps:** {', '.join(map_names)}\n\n"
-            f"👥 **Đã đăng ký: {len(registered)} người**\n"
-            f"{reg_list_str}\n\n"
-            "Nhấn **Tham gia** để đăng ký hoặc **Hủy đăng ký** để rút tên."
-        ),
+        description=body,
         color=discord.Color.blue(),
     )
     return embed
 
 
-def build_checkin_embed(match, p_map: dict[int, str]) -> discord.Embed:
+def build_checkin_embed(match, p_map: dict[int, str], *, ended: bool = False) -> discord.Embed:
     """Build (or rebuild) the check-in embed for *match*.
 
     Parameters
@@ -120,26 +132,42 @@ def build_checkin_embed(match, p_map: dict[int, str]) -> discord.Embed:
         A ``Match`` ORM instance.
     p_map:
         Dict mapping Discord user ID (int) → in-game name (str).
+    ended:
+        When *True*, append a notice that check-in is closed and lobby
+        division is starting, and use a grey color.
     """
     time_start = match.time_start
     registered = match.register_users_id or []
     checked_in = match.checkin_users_id or []
+
+    try:
+        checkin_open_dt = time_start - parse_duration(match.time_reach_checkin)
+        divide_dt = time_start - parse_duration(match.time_reach_divide_lobby)
+        checkin_window = f"{format_vn_time(checkin_open_dt)} → {format_vn_time(divide_dt)}"
+    except (ValueError, AttributeError):
+        checkin_window = "N/A"
 
     checkin_list_str = (
         "\n".join(f"- {p_map.get(u, 'Unknown')} ✅" for u in checked_in)
         or "_(chưa có ai)_"
     )
 
+    body = (
+        f"🆔 **Match ID:** #{match.id}\n"
+        f"⏰ **Thời gian check-in:** {checkin_window}\n"
+        f"👥 **Đã check-in:** {len(checked_in)}/{len(registered)}\n\n"
+        f"✅ **Danh sách check-in:**\n{checkin_list_str}"
+    )
+
+    if ended:
+        body += "\n\n🔒 **Check-in đã kết thúc. Đang tiến hành chia lobby...**"
+    else:
+        body += "\n\nNhấn **Sẵn sàng ✅** để xác nhận tham gia."
+
     embed = discord.Embed(
         title="📋 Check-in FFA Match",
-        description=(
-            f"🆔 **Match ID:** #{match.id}\n"
-            f"⏰ **Giờ kết thúc check-in:** {format_vn_time(time_start)}\n"
-            f"👥 **Đã check-in:** {len(checked_in)}/{len(registered)}\n\n"
-            f"✅ **Danh sách check-in:**\n{checkin_list_str}\n\n"
-            "Nhấn **Sẵn sàng ✅** để xác nhận tham gia."
-        ),
-        color=discord.Color.green(),
+        description=body,
+        color=discord.Color.dark_gray() if ended else discord.Color.green(),
     )
     embed.set_footer(text=f"Match ID: {match.id}")
     return embed
@@ -263,8 +291,9 @@ class MapNamesModal(discord.ui.Modal):
             return
 
         view = RegistrationView(match_id=match_id, db_session_factory=self.db_session_factory)
+        role_mention = f"<@&{_SHOWMATCH_ROLE_ID}>" if _SHOWMATCH_ROLE_ID else None
         try:
-            reg_msg = await self.register_channel.send(embed=embed, view=view)
+            reg_msg = await self.register_channel.send(content=role_mention, embed=embed, view=view)
         except discord.HTTPException as exc:
             log.exception(
                 "Failed to send registration message for match #%s (user=%s)",
@@ -476,6 +505,31 @@ class CheckInView(discord.ui.View):
                         "⚠️ Bạn chưa đăng ký tham gia match này!", ephemeral=True,
                     )
                     return
+
+                # Validate that the current time is within the check-in window
+                try:
+                    now = now_vn()
+                    checkin_open = match.time_start - parse_duration(match.time_reach_checkin)
+                    divide_time = match.time_start - parse_duration(match.time_reach_divide_lobby)
+                    if now < checkin_open:
+                        await _safe_send(
+                            interaction, f"CheckInView.ready match={self.match_id}",
+                            f"⏳ Chưa đến giờ check-in! Giờ mở check-in: {format_vn_time(checkin_open)}",
+                            ephemeral=True,
+                        )
+                        return
+                    if now >= divide_time:
+                        await _safe_send(
+                            interaction, f"CheckInView.ready match={self.match_id}",
+                            f"⌛ Đã hết thời gian check-in! Check-in kết thúc lúc: {format_vn_time(divide_time)}",
+                            ephemeral=True,
+                        )
+                        return
+                except ValueError:
+                    log.warning(
+                        "CheckInView.ready: could not parse check-in window for match #%s – allowing check-in",
+                        self.match_id,
+                    )
 
                 checked_in: list = (match.checkin_users_id or []).copy()
                 if user_id in checked_in:

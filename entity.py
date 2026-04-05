@@ -31,6 +31,9 @@ class Match(Base):
     register_message_id = Column(BigInteger, nullable=True)
     # Discord message ID of the check-in embed (set when check-in is triggered)
     checkin_message_id = Column(BigInteger, nullable=True)
+    # Lifecycle status: "open" → "checkin" → "dividing" | "cancelled"
+    # nullable so that rows created before this column was added are treated as "open"
+    status = Column(String(20), nullable=True, server_default="open")
 
 
 class User(Base):
