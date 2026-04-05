@@ -631,3 +631,22 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             f"• Vào kênh kết quả để nhập điểm và test nút **Chốt Kết Quả ✅**.",
             ephemeral=True,
         )
+
+    # ── Emoji test ────────────────────────────────────────────────────────────
+
+    @bot.tree.command(
+        name="emojitest",
+        description="Kiểm tra chuỗi emoji custom: nhập chuỗi bất kỳ, bot sẽ gửi lại trong embed để xem kết quả.",
+        guild=guild_obj,
+    )
+    @app_commands.describe(text="Chuỗi cần kiểm tra (VD: <:ten_emoji:123456789>)")
+    async def emojitest(interaction: discord.Interaction, text: str) -> None:
+        """Echo *text* back inside an embed so the user can verify custom emoji strings."""
+        embed = discord.Embed(
+            title="🔍 Kiểm Tra Emoji",
+            description=text,
+            color=discord.Color.og_blurple(),
+        )
+        embed.add_field(name="Chuỗi gốc (raw)", value=f"`{discord.utils.escape_markdown(text)}`", inline=False)
+        embed.set_footer(text=f"Yêu cầu bởi {interaction.user.display_name}")
+        await _safe_send(interaction, "emojitest", embed=embed)
