@@ -112,6 +112,47 @@ def assign_civs(all_keys: list[str], count_fight: int) -> dict[str, list[str]]:
     return result
 
 
+# ── Civ emoji helpers ──────────────────────────────────────────────────────────
+
+
+def _build_emoji_map(guild: discord.Guild) -> dict[str, str]:
+    """Build a ``{emoji_name: discord_emoji_str}`` map from the guild's custom emojis."""
+    return {e.name: str(e) for e in guild.emojis}
+
+
+def _resolve_emoji_str(s: str, emoji_map: dict[str, str]) -> str:
+    """Resolve a ``:name:`` style string to ``<:name:id>`` using the guild emoji map.
+
+    Strings that are already in ``<:name:id>`` or ``<a:name:id>`` format are
+    returned unchanged.  Unknown names are also returned as-is.
+    """
+    if s.startswith("<:") or s.startswith("<a:"):
+        return s  # already fully-qualified
+    if s.startswith(":") and s.endswith(":") and len(s) > 2:
+        name = s[1:-1]
+        if name in emoji_map:
+            return emoji_map[name]
+    return s
+
+
+def _civ_display_name(civ_str: str) -> str:
+    """Extract a human-readable civ name from a Discord emoji string.
+
+    Examples::
+
+        "<:abbasid_dynasty:123456>"  →  "Abbasid Dynasty"
+        ":abbasid_dynasty:"          →  "Abbasid Dynasty"
+        "🎮"                         →  "🎮"
+    """
+    if civ_str.startswith("<:") and ":" in civ_str[2:]:
+        raw = civ_str[2:].split(":")[0]
+        return raw.replace("_", " ").title()
+    if civ_str.startswith(":") and civ_str.endswith(":") and len(civ_str) > 2:
+        raw = civ_str[1:-1]
+        return raw.replace("_", " ").title()
+    return civ_str
+
+
 # ── Embed builders ─────────────────────────────────────────────────────────────
 
 _MAX_INGAME_NAME_LEN = 15
@@ -124,16 +165,17 @@ def build_lobby_display_embed(
 ) -> discord.Embed:
     """Build the public display embed that shows players and their civ assignments.
 
-    Format (one line per player)::
+    Layout::
 
         Match #N | Lobby tier #N
-        **Tên**          **Trận 1**  **Trận 2**  …
-        PlayerIngame     🎮          🏹          …
+        **Người chơi** | **Trận 1** | **Trận 2** …
+        `PlayerIngame  ` | <:civ:id> | <:civ:id> …
         …
-        AI               🎭          …
+        `AI            ` | <:civ:id> …
 
-    Player names are padded to equal width (truncated to ``_MAX_INGAME_NAME_LEN``
-    characters) to keep the civ-emoji columns roughly aligned.
+    Player names are placed in inline code spans (monospace) padded to equal
+    width so that the civ columns stay aligned regardless of name length.
+    Column headers are bold.
     """
     tier = lobby.tier
     emoji = TIER_EMOJI.get(tier, "🎮")
@@ -149,30 +191,33 @@ def build_lobby_display_embed(
             return name[:_MAX_INGAME_NAME_LEN - 1] + "…"
         return name
 
-    # Compute display names and the column width needed
+    # Compute display names and the column width needed for alignment
     display_names: dict[int, str] = {uid: _truncate(p_map.get(uid, "Unknown")) for uid in users_list}
     all_name_lens = [len(n) for n in display_names.values()]
     if ai_count > 0:
         all_name_lens.append(len("AI"))
     col_width = max(all_name_lens, default=4)
 
-    # Build header row: bold label + bold fight column labels
-    fight_cols = "  ".join(f"**Trận {i}**" for i in range(1, count_fight + 1))
-    header = f"**{'Tên'.ljust(col_width)}**  {fight_cols}"
+    # Bold header row with pipe separators
+    fight_headers = " | ".join(f"**Trận {i}**" for i in range(1, count_fight + 1))
+    header = f"**Người chơi** | {fight_headers}"
 
     rows = [header]
     for uid in users_list:
-        name_padded = display_names[uid].ljust(col_width)
+        # Inline code keeps the name monospace-padded for column alignment
+        name_cell = f"`{display_names[uid].ljust(col_width)}`"
         player_civs = civs.get(str(uid), [])
-        civ_str = "  ".join(player_civs) if player_civs else "—"
-        rows.append(f"{name_padded}  {civ_str}")
+        civ_cells = " | ".join(player_civs[i] if i < len(player_civs) else "—"
+                               for i in range(count_fight))
+        rows.append(f"{name_cell} | {civ_cells}")
 
     for i in range(1, ai_count + 1):
         ai_key = f"AI_{i}"
-        name_padded = "AI".ljust(col_width)
+        name_cell = f"`{'AI'.ljust(col_width)}`"
         player_civs = civs.get(ai_key, [])
-        civ_str = "  ".join(player_civs) if player_civs else "—"
-        rows.append(f"{name_padded}  {civ_str}")
+        civ_cells = " | ".join(player_civs[j] if j < len(player_civs) else "—"
+                               for j in range(count_fight))
+        rows.append(f"{name_cell} | {civ_cells}")
 
     description = "\n".join(rows)
 
@@ -495,6 +540,9 @@ async def divide_lobbies(
             f"✅ **Match #{match.id}** – Bắt đầu chia {len(lobby_specs)} lobby…"
         )
 
+    # Pre-build emoji map once so we can resolve :name: → <:name:id> per lobby
+    guild_emoji_map: dict[str, str] = _build_emoji_map(guild) if guild else {}
+
     for tier, lobby_num, player_ids, ai_count in lobby_specs:
         # Build civ keys: real players + AI slots
         ai_keys = [f"AI_{i + 1}" for i in range(ai_count)]
@@ -508,6 +556,13 @@ async def divide_lobbies(
                     f"⚠️ Không thể chia civ cho Lobby {tier} #{lobby_num}: {exc}"
                 )
             civs = {}
+
+        # Resolve any :name: emoji strings to <:name:id> so they render in Discord
+        if guild_emoji_map:
+            civs = {
+                key: [_resolve_emoji_str(c, guild_emoji_map) for c in civ_list]
+                for key, civ_list in civs.items()
+            }
 
         # Persist lobby to DB
         with db_session_factory() as session:

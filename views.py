@@ -616,7 +616,7 @@ def build_lobby_result_embed(lobby, match, p_map: dict[int, str] | None = None) 
         Optional dict mapping Discord user ID (int) → in-game name (str).
         When provided, score lines display the in-game name instead of a @mention.
     """
-    from lobby_division import TIER_EMOJI
+    from lobby_division import TIER_EMOJI, _civ_display_name
 
     tier: str = lobby.tier or ""
     emoji = TIER_EMOJI.get(tier, "🎮")
@@ -639,6 +639,7 @@ def build_lobby_result_embed(lobby, match, p_map: dict[int, str] | None = None) 
     map_names: list = match.name_maps or []
     count_fight: int = match.count_fight
     scores: dict = lobby.scores or {}
+    civs_dict: dict = lobby.civs or {}
 
     lines = [
         f"🆔 **Match:** #{match.id}",
@@ -661,7 +662,11 @@ def build_lobby_result_embed(lobby, match, p_map: dict[int, str] | None = None) 
                     name = f"<@{uid}>"
                 else:
                     name = uid  # AI slot
-                score_lines.append(f"  • {name}: **{score}**")
+                # Append the civ emoji for this fight alongside the player name
+                user_civs = civs_dict.get(str(uid), [])
+                civ_str = user_civs[i - 1] if i - 1 < len(user_civs) else ""
+                display = f"{name} {civ_str}" if civ_str else name
+                score_lines.append(f"  • {display}: **{score}**")
             lines.append(f"⚔️ **Trận {i} ({map_name}):**\n" + "\n".join(score_lines))
         else:
             lines.append(f"⚔️ **Trận {i} ({map_name}):** _(chưa có kết quả)_")
@@ -951,6 +956,7 @@ class LobbyResultView(discord.ui.View):
 
         from entity import Lobby, User
         from config import RESULT_CHANNEL_ID
+        from lobby_division import _civ_display_name
 
         try:
             with self.db_session_factory() as session:
@@ -970,6 +976,7 @@ class LobbyResultView(discord.ui.View):
 
                 users_list: list = lobby.users_list or []
                 result_msg_id = lobby.result_message_id
+                civs_dict: dict = lobby.civs or {}
                 users = (
                     session.query(User).filter(User.id.in_(users_list)).all()
                     if users_list
@@ -989,9 +996,14 @@ class LobbyResultView(discord.ui.View):
             return
 
         # Build page entries: (str_key, display_label)
+        # Label shows "IngameName (CivName)" so the judge knows which civ each player uses.
         entries: list[tuple[str, str]] = []
         for uid in users_list:
-            label = p_map.get(uid, f"User{uid}")
+            ingame_name = p_map.get(uid, f"User{uid}")
+            user_civs = civs_dict.get(str(uid), [])
+            fight_civ = user_civs[fight_idx - 1] if fight_idx - 1 < len(user_civs) else ""
+            civ_name = _civ_display_name(fight_civ) if fight_civ else ""
+            label = f"{ingame_name} ({civ_name})" if civ_name else ingame_name
             entries.append((str(uid), label))
 
         page1 = entries[:_MODAL_PAGE_SIZE]
