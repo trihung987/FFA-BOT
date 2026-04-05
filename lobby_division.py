@@ -29,26 +29,29 @@ log = logging.getLogger(__name__)
 # Each entry is a Discord custom-emoji string, e.g. "<:civ_anh:1234567890>".
 # Leave as empty strings "" – admin fills in the actual emoji codes before deploy.
 CIVS: list[str] = [
-    "",  # civ 1
-    "",  # civ 2
-    "",  # civ 3
-    "",  # civ 4
-    "",  # civ 5
-    "",  # civ 6
-    "",  # civ 7
-    "",  # civ 8
-    "",  # civ 9
-    "",  # civ 10
-    "",  # civ 11
-    "",  # civ 12
-    "",  # civ 13
-    "",  # civ 14
-    "",  # civ 15
-    "",  # civ 16
-    "",  # civ 17
-    "",  # civ 18
-    "",  # civ 19
-    "",  # civ 20
+    ":abbasid_dynasty:",  # civ 1
+    ":ayyubids:",  # civ 2
+    ":byzantines:",  # civ 3
+    ":chinese:",  # civ 4
+    ":delhi_sultanate:",  # civ 5
+    ":english:",  # civ 6
+    ":french:",  # civ 7
+    ":golden_horde:",  # civ 8
+    ":holy_roman_empire:",  # civ 9
+    ":house_of_lancaster:",  # civ 10
+    ":japanese:",  # civ 11
+    ":jeanne_darc:",  # civ 12
+    ":knights_templar:",  # civ 13
+    ":macedonian_dynasty:",  # civ 14
+    ":malians:",  # civ 15
+    ":mongols:",  # civ 16
+    ":order_of_the_dragon:",  # civ 17
+    ":ottomans:",  # civ 18
+    ":rus:",  # civ 19
+    ":sengoku_daimyo:",  # civ 20
+    ":tughlaq_dynasty:",  # civ 21
+    ":zhu_xis_legacy:"  # civ 22
+
 ]
 
 # ── Lobby tier constants ───────────────────────────────────────────────────────
