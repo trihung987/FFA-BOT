@@ -956,7 +956,6 @@ class LobbyResultView(discord.ui.View):
 
         from entity import Lobby, User
         from config import RESULT_CHANNEL_ID
-        from lobby_division import _civ_display_name
 
         try:
             with self.db_session_factory() as session:
@@ -996,14 +995,13 @@ class LobbyResultView(discord.ui.View):
             return
 
         # Build page entries: (str_key, display_label)
-        # Label shows "IngameName (CivName)" so the judge knows which civ each player uses.
+        # Label shows "IngameName (emoji)" so the judge knows which civ each player uses.
         entries: list[tuple[str, str]] = []
         for uid in users_list:
             ingame_name = p_map.get(uid, f"User{uid}")
             user_civs = civs_dict.get(str(uid), [])
             fight_civ = user_civs[fight_idx - 1] if fight_idx - 1 < len(user_civs) else ""
-            civ_name = _civ_display_name(fight_civ) if fight_civ else ""
-            label = f"{ingame_name} ({civ_name})" if civ_name else ingame_name
+            label = f"{ingame_name} ({fight_civ})" if fight_civ else ingame_name
             entries.append((str(uid), label))
 
         page1 = entries[:_MODAL_PAGE_SIZE]
