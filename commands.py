@@ -499,8 +499,8 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                 match = Match(
                     register_users_id=[admin_id],
                     checkin_users_id=[admin_id],
-                    name_maps=["Test Map"],
-                    count_fight=1,
+                    name_maps=["Map 1", "Map 2", "Map 3", "Map 4"],
+                    count_fight=4,
                     time_start=now_vn() + timedelta(hours=2),
                     time_reach_checkin="2h",
                     time_reach_divide_lobby="1h",
@@ -553,7 +553,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         ai_count = 7
         all_civ_keys = [str(admin_id)] + [f"AI_{i}" for i in range(1, ai_count + 1)]
         try:
-            civs = assign_civs(all_civ_keys, 1)
+            civs = assign_civs(all_civ_keys, 4)
         except (ValueError, Exception):
             log.exception("test_flow: civ assignment failed (match=%s)", match_id)
             civs = {}
@@ -624,8 +624,8 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                         result_embed = build_lobby_result_embed(db_lobby, db_match)
                 result_view = LobbyResultView(
                     lobby_id=lobby_id,
-                    count_fight=1,
-                    map_names=["Test Map"],
+                    count_fight=4,
+                    map_names=["Map 1", "Map 2", "Map 3", "Map 4"],
                     db_session_factory=db_session_factory,
                 )
                 result_msg = await result_channel.send(embed=result_embed, view=result_view)
@@ -642,6 +642,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             f"• Match ID: **#{match_id}**\n"
             f"• Người chơi thật: {interaction.user.mention} (in-game: **{ingame_name}**)\n"
             f"• AI slots: **7**\n"
+            f"• Số trận: **4** (Map 1 → Map 4)\n"
             f"• Lobby **{TIER_RECRUIT} #1** đã được tạo.\n"
             f"• Vào kênh kết quả để nhập điểm và test nút **Chốt Kết Quả ✅**.",
             ephemeral=True,
