@@ -163,17 +163,16 @@ def build_lobby_display_embed(
 ) -> discord.Embed:
     """Build the public display embed that shows players and their civ assignments.
 
-    Uses Discord inline embed fields so civ emojis render natively without any
-    code-block / dark-background formatting.
+    Uses the embed description as a table so that all fights appear on one row
+    per player regardless of how many fights there are.  This avoids the
+    Discord 3-inline-fields-per-row limit that caused extra fights to wrap.
 
-    Layout (three inline fields side-by-side)::
+    Layout::
 
-        Người chơi   | Trận 1  | Trận 2  | Trận 3
-        PlayerIngame | <emoji> | <emoji> | <emoji>
-        AI           | <emoji> | <emoji> | <emoji>
-
-    Discord places up to three inline fields per row.  For more than two fights
-    the extra fight fields wrap to the next row.
+        Người chơi   | Trận 1   | Trận 2   | Trận 3   | Trận 4
+        ─────────────────────────────────────────────────────────
+        PlayerIngame | <civ>    | <civ>    | <civ>    | <civ>
+        AI           | <civ>    | <civ>    | <civ>    | <civ>
     """
     tier = lobby.tier
     emoji = TIER_EMOJI.get(tier, "🎮")
@@ -191,21 +190,24 @@ def build_lobby_display_embed(
     for idx in range(1, ai_count + 1):
         player_entries.append(("AI", f"AI_{idx}"))
 
-    embed = discord.Embed(title=title, color=discord.Color.gold())
+    # Header row: fight labels
+    fight_labels = " · ".join(f"**Trận {i}**" for i in range(1, count_fight + 1))
+    header = f"**Người chơi** ─── {fight_labels}"
+    separator = "─" * 40
 
-    # "Người chơi" column
-    names_value = "\n".join(name for name, _ in player_entries) or "—"
-    embed.add_field(name="Người chơi", value=names_value, inline=True)
+    # One line per player showing all their civs
+    rows: list[str] = []
+    for name, key in player_entries:
+        player_civs = civs.get(key, [])
+        civ_strs = [
+            player_civs[i - 1] if i - 1 < len(player_civs) else "—"
+            for i in range(1, count_fight + 1)
+        ]
+        rows.append(f"**{name}**: " + " · ".join(civ_strs))
 
-    # One inline field per fight showing the civ emoji for each player
-    for fight_idx in range(1, count_fight + 1):
-        civ_lines: list[str] = []
-        for _, key in player_entries:
-            player_civs = civs.get(key, [])
-            civ = player_civs[fight_idx - 1] if fight_idx - 1 < len(player_civs) else "—"
-            civ_lines.append(civ)
-        embed.add_field(name=f"Trận {fight_idx}", value="\n".join(civ_lines) or "—", inline=True)
+    description = header + "\n" + separator + "\n" + "\n".join(rows)
 
+    embed = discord.Embed(title=title, description=description, color=discord.Color.gold())
     embed.set_footer(text=f"Match #{match.id} | ID lobby #{lobby.id}")
     return embed
 
