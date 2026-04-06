@@ -176,10 +176,12 @@ def _civ_abbrev(civ_str: str) -> str:
     name = _civ_display_name(civ_str)
     if not name:
         return "??"
-    words = name.split()
+    words = [w for w in name.split() if w]  # filter out empty tokens
     if len(words) >= 2:
         return (words[0][0] + words[1][0]).upper()
-    return name[:2].upper()
+    if words:
+        return words[0][:2].upper()
+    return "??"
 
 
 def build_lobby_display_embed(
