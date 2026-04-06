@@ -156,6 +156,32 @@ def _civ_display_name(civ_str: str) -> str:
 
 # ── Embed builders ─────────────────────────────────────────────────────────────
 
+_NAME_MAX = 14   # max player-name width; fits "Đưa em vào cơn" exactly
+_COL_PAD = 1     # spaces of padding on each side of a fight-column value
+
+
+def _trunc_name(name: str) -> str:
+    """Truncate *name* to at most :data:`_NAME_MAX` chars, appending '…' if cut."""
+    if len(name) > _NAME_MAX:
+        return name[: _NAME_MAX - 1] + "…"
+    return name
+
+
+def _civ_abbrev(civ_str: str) -> str:
+    """Return a 2-char uppercase abbreviation for a civ string.
+
+    Uses the initials of the first two words (e.g. "Abbasid Dynasty" → "AD").
+    Falls back to the first two characters of the name for single-word civs.
+    """
+    name = _civ_display_name(civ_str)
+    if not name:
+        return "??"
+    words = name.split()
+    if len(words) >= 2:
+        return (words[0][0] + words[1][0]).upper()
+    return name[:2].upper()
+
+
 def build_lobby_display_embed(
     lobby,
     match,
@@ -163,20 +189,20 @@ def build_lobby_display_embed(
 ) -> discord.Embed:
     """Build the public display embed that shows players and their civ assignments.
 
-    Uses the embed description as a table so that all fights appear on one row
-    per player regardless of how many fights there are.  This avoids the
-    Discord 3-inline-fields-per-row limit that caused extra fights to wrap.
+    The table is rendered inside a code block so that columns are perfectly
+    aligned in Discord's monospace font.  Each fight column shows a 2-character
+    civ abbreviation (e.g. "AD" for Abbasid Dynasty) centered under its header.
 
-    Layout::
+    Layout (inside ```…```)::
 
-        Người chơi   | Trận 1   | Trận 2   | Trận 3   | Trận 4
-        ─────────────────────────────────────────────────────────
-        PlayerIngame | <civ>    | <civ>    | <civ>    | <civ>
-        AI           | <civ>    | <civ>    | <civ>    | <civ>
+        Người chơi      │  T1  │  T2  │  T3  │  T4
+        ────────────────┼──────┼──────┼──────┼──────
+        Đưa em vào cơn  │  AD  │  FR  │  MO  │  CH
+        AI              │  BY  │  JA  │  RU  │  EN
     """
     tier = lobby.tier
-    emoji = TIER_EMOJI.get(tier, "🎮")
-    title = f"{emoji} Match #{match.id} | Lobby {tier} #{lobby.lobby_number}"
+    tier_icon = TIER_EMOJI.get(tier, "🎮")
+    title = f"{tier_icon} Match #{match.id} | Lobby {tier} #{lobby.lobby_number}"
 
     count_fight: int = match.count_fight
     civs: dict = lobby.civs or {}
@@ -185,29 +211,44 @@ def build_lobby_display_embed(
 
     # Build ordered player entries: (display_name, civ_key)
     player_entries: list[tuple[str, str]] = [
-        (p_map.get(uid, "Unknown"), str(uid)) for uid in users_list
+        (_trunc_name(p_map.get(uid, "Unknown")), str(uid)) for uid in users_list
     ]
     for idx in range(1, ai_count + 1):
         player_entries.append(("AI", f"AI_{idx}"))
 
-    # Header row: fight labels
-    fight_labels = " · ".join(f"**Trận {i}**" for i in range(1, count_fight + 1))
-    header = f"**Người chơi** ─── {fight_labels}"
-    separator = "─" * 40
+    # Column widths
+    # Fight column inner width: padding + 2-char value + padding  (e.g. " AD ")
+    fight_col_inner = _COL_PAD + 2 + _COL_PAD  # = 4 for _COL_PAD == 1
 
-    # One line per player showing all their civs
+    # Header labels: "T1", "T2", …
+    fight_headers = [f"T{i}" for i in range(1, count_fight + 1)]
+
+    # Build header row and separator row
+    name_header = "Người chơi".ljust(_NAME_MAX)
+    fight_header_cells = "│".join(
+        h.center(fight_col_inner) for h in fight_headers
+    )
+    header_row = f"{name_header} │ {fight_header_cells}"
+
+    sep_name = "─" * _NAME_MAX
+    sep_fight = "┼".join("─" * fight_col_inner for _ in fight_headers)
+    separator_row = f"{sep_name}─┼─{sep_fight}"
+
+    # Data rows
     rows: list[str] = []
     for name, key in player_entries:
         player_civs = civs.get(key, [])
-        civ_strs = [
-            player_civs[i - 1] if i - 1 < len(player_civs) else "—"
+        cells = "│".join(
+            _civ_abbrev(player_civs[i - 1]).center(fight_col_inner)
+            if i - 1 < len(player_civs)
+            else "──".center(fight_col_inner)
             for i in range(1, count_fight + 1)
-        ]
-        rows.append(f"**{name}**: " + " · ".join(civ_strs))
+        )
+        rows.append(f"{name:<{_NAME_MAX}} │ {cells}")
 
-    description = header + "\n" + separator + "\n" + "\n".join(rows)
+    table = "```\n" + header_row + "\n" + separator_row + "\n" + "\n".join(rows) + "\n```"
 
-    embed = discord.Embed(title=title, description=description, color=discord.Color.gold())
+    embed = discord.Embed(title=title, description=table, color=discord.Color.gold())
     embed.set_footer(text=f"Match #{match.id} | ID lobby #{lobby.id}")
     return embed
 
