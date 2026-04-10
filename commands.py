@@ -110,6 +110,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         time_reach_checkin="Thời gian mở check-in trước khi bắt đầu (VD: 1h hoặc 30p)",
         time_reach_divide_lobby="Thời gian chia lobby trước khi bắt đầu (VD: 30p)",
     )
+    @app_commands.checks.has_permissions(administrator=True)
     async def open_registration(
         interaction: discord.Interaction,
         count_fight: int,

@@ -252,6 +252,15 @@ class ScoreModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         from entity import Lobby
 
+        if not interaction.user.guild_permissions.administrator:
+            await _safe_send(
+                interaction,
+                f"ScoreModal.on_submit lobby={self.lobby_id}",
+                "❌ Chỉ admin mới có thể nhập và lưu kết quả.",
+                ephemeral=True,
+            )
+            return
+
         new_scores = {key: inp.value for key, inp in self._inputs}
 
         if self.overflow_entries:
