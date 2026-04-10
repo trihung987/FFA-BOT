@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands as ext_commands
 from typing import Optional
 
-from config import GUILD_ID, REGISTER_CHANNEL_ID
+from config import GUILD_ID, REGISTER_CHANNEL_ID, SHOWMATCH_ROLE_ID
 from helpers import now_vn, safe_send_interaction, is_interaction_expired
 from views import MapNamesModal
 
@@ -279,6 +279,42 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                 "❌ Đã xảy ra lỗi nội bộ khi lưu dữ liệu.", ephemeral=True,
             )
             return
+
+        role_note = ""
+        if SHOWMATCH_ROLE_ID:
+            showmatch_role = interaction.guild.get_role(SHOWMATCH_ROLE_ID) if interaction.guild else None
+            if showmatch_role is None:
+                log.warning(
+                    "set_ingame_name: SHOWMATCH_ROLE_ID=%s not found in guild (admin=%s, player=%s)",
+                    SHOWMATCH_ROLE_ID,
+                    interaction.user.id,
+                    player.id,
+                )
+                role_note = "\n⚠️ Không tìm thấy role Showmatch trong server (kiểm tra SHOWMATCH_ROLE_ID)."
+            elif showmatch_role not in player.roles:
+                try:
+                    await player.add_roles(showmatch_role, reason="Auto grant Showmatch role from /set_ingame_name")
+                    role_note = f"\n✅ Đã thêm role {showmatch_role.mention} cho {player.mention}."
+                except discord.Forbidden:
+                    log.warning(
+                        "set_ingame_name: missing permissions to add showmatch role (admin=%s, player=%s, role=%s)",
+                        interaction.user.id,
+                        player.id,
+                        SHOWMATCH_ROLE_ID,
+                    )
+                    role_note = "\n⚠️ Không thể thêm role Showmatch do bot thiếu quyền."
+                except discord.HTTPException as exc:
+                    log.error(
+                        "set_ingame_name: HTTP error adding showmatch role (admin=%s, player=%s, role=%s): %s",
+                        interaction.user.id,
+                        player.id,
+                        SHOWMATCH_ROLE_ID,
+                        exc,
+                    )
+                    role_note = "\n⚠️ Không thể thêm role Showmatch do lỗi Discord API."
+
+        if role_note:
+            msg += role_note
 
         await safe_send_interaction(interaction, "set_ingame_name", msg, ephemeral=True)
 
