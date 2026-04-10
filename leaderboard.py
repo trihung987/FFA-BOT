@@ -325,31 +325,31 @@ def register_leaderboard_commands(bot: ext_commands.Bot, db_session_factory) -> 
 
         await safe_send_interaction(interaction, "leaderboard", content)
 
-    @bot.tree.command(
-        name="ansi_256_test",
-        description="Test toàn bộ mã màu ANSI từ 0 đến 255.",
-        guild=guild_obj,
-    )
-    async def ansi_256_test(interaction: discord.Interaction) -> None:
-        """Show ANSI 256-color preview in multiple pages."""
-        lines_per_page = 20
-        lines: list[str] = []
+    # @bot.tree.command(
+    #     name="ansi_256_test",
+    #     description="Test toàn bộ mã màu ANSI từ 0 đến 255.",
+    #     guild=guild_obj,
+    # )
+    # async def ansi_256_test(interaction: discord.Interaction) -> None:
+    #     """Show ANSI 256-color preview in multiple pages."""
+    #     lines_per_page = 20
+    #     lines: list[str] = []
 
-        for code in range(256):
-            label = f"{code:>3}"
-            sample = f"\u001b[38;5;{code}mFG\u001b[0m / \u001b[48;5;{code}m  BG  \u001b[0m"
-            lines.append(f"{label}: {sample}")
+    #     for code in range(256):
+    #         label = f"{code:>3}"
+    #         sample = f"\u001b[38;5;{code}mFG\u001b[0m / \u001b[48;5;{code}m  BG  \u001b[0m"
+    #         lines.append(f"{label}: {sample}")
 
-        pages: list[str] = []
-        for i in range(0, len(lines), lines_per_page):
-            chunk = "\n".join(lines[i:i + lines_per_page])
-            page_no = (i // lines_per_page) + 1
-            total = (len(lines) + lines_per_page - 1) // lines_per_page
-            pages.append(f"[{page_no}/{total}]\n```ansi\n{chunk}\n```")
+    #     pages: list[str] = []
+    #     for i in range(0, len(lines), lines_per_page):
+    #         chunk = "\n".join(lines[i:i + lines_per_page])
+    #         page_no = (i // lines_per_page) + 1
+    #         total = (len(lines) + lines_per_page - 1) // lines_per_page
+    #         pages.append(f"[{page_no}/{total}]\n```ansi\n{chunk}\n```")
 
-        try:
-            await interaction.response.send_message(pages[0], ephemeral=True)
-            for page in pages[1:]:
-                await interaction.followup.send(page, ephemeral=True)
-        except Exception:
-            log.exception("ansi_256_test failed (user=%s)", interaction.user.id)
+    #     try:
+    #         await interaction.response.send_message(pages[0], ephemeral=True)
+    #         for page in pages[1:]:
+    #             await interaction.followup.send(page, ephemeral=True)
+    #     except Exception:
+    #         log.exception("ansi_256_test failed (user=%s)", interaction.user.id)
