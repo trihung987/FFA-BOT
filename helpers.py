@@ -1,8 +1,12 @@
 import re
+import logging
 from datetime import datetime, timedelta, timezone
+
+import discord
 
 # Vietnam Standard Time - UTC+7 (no DST)
 VN_TZ = timezone(timedelta(hours=7))
+log = logging.getLogger(__name__)
 
 
 def parse_duration(value: str) -> timedelta:
@@ -46,6 +50,36 @@ def format_vnd(amount: int) -> str:
 def format_vn_time(dt: datetime) -> str:
     """Format: 14:30 - Ngày 25/12/2026"""
     return dt.strftime("%H:%M - Ngày %d/%m/%Y")
+
+
+def is_interaction_expired(exc: discord.NotFound) -> bool:
+    return exc.code == 10062
+
+
+async def safe_send_interaction(interaction: discord.Interaction, context: str, *args, **kwargs) -> None:
+    """Send an interaction response or follow-up, logging timeout/HTTP errors."""
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(*args, **kwargs)
+        else:
+            await interaction.response.send_message(*args, **kwargs)
+    except discord.InteractionResponded:
+        try:
+            await interaction.followup.send(*args, **kwargs)
+        except discord.NotFound as exc:
+            if is_interaction_expired(exc):
+                log.warning("Interaction expired (%s, user=%s)", context, interaction.user.id)
+            else:
+                log.error("NotFound sending follow-up (%s, user=%s): %s", context, interaction.user.id, exc)
+        except discord.HTTPException as exc:
+            log.error("HTTP error sending follow-up (%s, user=%s): %s", context, interaction.user.id, exc)
+    except discord.NotFound as exc:
+        if is_interaction_expired(exc):
+            log.warning("Interaction expired (%s, user=%s)", context, interaction.user.id)
+        else:
+            log.error("NotFound sending response (%s, user=%s): %s", context, interaction.user.id, exc)
+    except discord.HTTPException as exc:
+        log.error("HTTP error sending response (%s, user=%s): %s", context, interaction.user.id, exc)
 
 
 # ELO tier thresholds (inclusive lower bound, exclusive upper bound)

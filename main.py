@@ -110,4 +110,6 @@ async def on_ready():
 # ── Run ────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    print("Starting bot...")
     bot.run(TOKEN)
+    print("bot stopped")

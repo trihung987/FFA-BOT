@@ -14,8 +14,12 @@ Handles:
 
 from __future__ import annotations
 
+from io import BytesIO
 import logging
+from pathlib import Path
 import random
+import re
+from urllib.request import urlopen
 from typing import TYPE_CHECKING
 
 import discord
@@ -154,69 +158,391 @@ def _civ_display_name(civ_str: str) -> str:
 
 
 
-# ── Embed builders ─────────────────────────────────────────────────────────────
+# ── Lobby display message builder ─────────────────────────────────────────────
 
 
-def build_lobby_display_embed(
+def build_lobby_display_notice_lines(lobby, match) -> list[str]:
+    """Build shared notice lines for lobby display messages."""
+    ordered_maps = [name for name in (match.name_maps or []) if name]
+    map_order_line = (
+        "🗺️ **Map theo thứ tự:** "
+        + " | ".join(f"T{i}: {name}" for i, name in enumerate(ordered_maps, start=1))
+    ) if ordered_maps else None
+
+    civ_notice = (
+        "> 🎯 *Các civs đã được phân bổ ngẫu nhiên theo danh sách dưới*"
+        if getattr(lobby, "civs", None)
+        else "🕒 Chưa có thông tin chọn tướng"
+    )
+
+    lines = [line for line in (map_order_line, civ_notice) if line]
+    return lines
+
+
+def _build_lobby_display_image_filename(lobby, match) -> str:
+    return f"lobby_{match.id}_{lobby.id}.png"
+
+
+def build_lobby_display_embed(lobby, match) -> discord.Embed:
+    """Build embed metadata for a lobby-division image message."""
+    tier = lobby.tier or ""
+    tier_icon = TIER_EMOJI.get(tier, "🎮")
+    notice_lines = build_lobby_display_notice_lines(lobby, match)
+
+    details = [
+        f"🆔 **ID Lobby:** #{lobby.id}",
+        f"🎯 **Tier:** {tier}",
+        f"👥 **Số người chơi:** {len(lobby.users_list or [])}",
+    ]
+    details.extend(notice_lines)
+
+    embed = discord.Embed(
+        title=f"{tier_icon} Chia Lobby - Trận #{match.id} | {tier} #{lobby.lobby_number}",
+        description="\n".join(details),
+        color=discord.Color.blue(),
+    )
+    embed.set_image(url=f"attachment://{_build_lobby_display_image_filename(lobby, match)}")
+    embed.set_footer(text=f"Lobby ID: {lobby.id} | Trận #{match.id}")
+    return embed
+
+
+def build_lobby_display_messages(
     lobby,
     match,
     p_map: dict[int, str],
-) -> discord.Embed:
-    """Build the public display embed that shows players and their civ assignments.
+) -> list[str]:
+    """Build one or more plain-text lobby display messages with a fixed-width civ table.
 
-    Each column is rendered as an inline embed field so Discord custom emoji
-    (e.g. ``<:abbasid_dynasty:123456>``) display correctly.  The player-name
-    column is followed by one inline field per fight round (T1, T2, …).
-    Discord groups inline fields in rows of three, keeping columns aligned.
-
-    Layout (inline embed fields)::
-
-        ┌─ Người chơi ──┬── T1 ──┬── T2 ──┐
-        │ PlayerOne     │  <:e1:>│  <:e4:>│
-        │ PlayerTwo     │  <:e2:>│  <:e5:>│
-        │ AI            │  <:e3:>│  <:e6:>│
-        └───────────────┴────────┴────────┘
+    The output is chunked so each message stays under Discord's 2000 character
+    limit while preserving emoji rendering in normal message content.
     """
     tier = lobby.tier
     tier_icon = TIER_EMOJI.get(tier, "🎮")
-    title = f"{tier_icon} Match #{match.id} | Lobby {tier} #{lobby.lobby_number}"
+    title = f"{tier_icon} **Trận #{match.id} | Lobby {tier} #{lobby.lobby_number}**"
+    notice_lines = build_lobby_display_notice_lines(lobby, match)
 
     count_fight: int = match.count_fight
     civs: dict = lobby.civs or {}
     users_list: list = lobby.users_list or []
     ai_count: int = lobby.ai_count or 0
 
-    # Build ordered player entries: (display_name, civ_key)
     player_entries: list[tuple[str, str]] = [
         (p_map.get(uid, "Unknown"), str(uid)) for uid in users_list
     ]
     for idx in range(1, ai_count + 1):
         player_entries.append(("AI", f"AI_{idx}"))
 
-    embed = discord.Embed(title=title, color=discord.Color.gold())
+    if not player_entries:
+        return [f"{title}\n_(chưa có người chơi)_"]
 
-    # Player-name column
-    names_value = "\n".join(name for name, _ in player_entries) or "\u200b"
-    embed.add_field(name="Người chơi", value=names_value, inline=True)
+    # Keep the name column fixed-width via inline-code padding. This gives a
+    # stable left column while still allowing civ emojis to render normally.
+    name_col_width = 15
 
-    # One inline field per fight round showing the resolved custom emoji
+    def _short_name(name: str) -> str:
+        return name if len(name) <= name_col_width else f"{name[:name_col_width - 1]}…"
+
+    def _code_cell(name: str) -> str:
+        return f"`{_short_name(name).ljust(name_col_width)}`"
+
+    header = f"{_code_cell('NGƯỜI CHƠI')} | " + " | ".join(f"**T{i}**" for i in range(1, count_fight + 1))
+    divider = f"{'-' * (name_col_width + 2)}|" + "|".join("---" for _ in range(count_fight))
+
+    row_lines: list[str] = []
+    for name, key in player_entries:
+        player_civs = civs.get(key, [])
+        civ_tokens = [player_civs[i] if i < len(player_civs) else "—" for i in range(count_fight)]
+        row_lines.append(f"{_code_cell(name)} | " + " | ".join(civ_tokens))
+
+    # Try to send in one message first.
+    single_message = "\n".join([title, *notice_lines, header, divider, *row_lines])
+    if len(single_message) <= 2000:
+        return [single_message]
+
+    # Fallback: chunk rows without repeating the title every time.
+    max_chars = 1950
+    messages: list[str] = []
+    current_lines: list[str] = [title, *notice_lines, header, divider]
+
+    def flush_current() -> None:
+        if len(current_lines) > 3:
+            messages.append("\n".join(current_lines))
+
+    for row in row_lines:
+        candidate = "\n".join(current_lines + [row])
+        if len(candidate) > max_chars:
+            flush_current()
+            current_lines = [header, divider, row]
+        else:
+            current_lines.append(row)
+
+    if len(current_lines) > 2:
+        messages.append("\n".join(current_lines))
+
+    return messages
+
+
+async def build_lobby_display_image_file(
+    lobby,
+    match,
+    p_map: dict[int, str],
+) -> discord.File | None:
+    """Render a lobby civ table image and return it as a Discord file.
+
+    Returns ``None`` when Pillow is unavailable or image rendering fails.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont, ImageOps
+    except Exception:
+        log.warning("Pillow not installed; falling back to text lobby table")
+        return None
+
+    count_fight: int = match.count_fight
+    civs: dict = lobby.civs or {}
+    users_list: list = lobby.users_list or []
+    ai_count: int = lobby.ai_count or 0
+
+    player_entries: list[tuple[str, str]] = [
+        (p_map.get(uid, "Unknown"), str(uid)) for uid in users_list
+    ]
+    for idx in range(1, ai_count + 1):
+        player_entries.append(("AI", f"AI_{idx}"))
+
+    if not player_entries:
+        return None
+
+    # Layout constants
+    pad = 36
+    name_col_w = 330
+    civ_col_w = 104
+    title_h = 96
+    subtitle_h = 36
+    header_h = 58
+    row_h = 54
+    fights_w = count_fight * civ_col_w
+    width = pad * 2 + name_col_w + fights_w
+    height = pad * 2 + title_h + subtitle_h + header_h + len(player_entries) * row_h
+
+    # Tier-based colors
+    tier_colors = {
+        TIER_LEGENDARY: {
+            "header_bg": (184, 134, 11, 245),  # Gold
+            "header_text": (255, 255, 255),
+            "row_alt_light": (32, 32, 32, 230),
+            "row_alt_dark": (42, 42, 42, 230),
+        },
+        TIER_CONQUEST: {
+            "header_bg": (220, 20, 60, 245),  # Crimson
+            "header_text": (255, 255, 255),
+            "row_alt_light": (32, 32, 32, 230),
+            "row_alt_dark": (42, 42, 42, 230),
+        },
+        TIER_DIAMOND: {
+            "header_bg": (64, 180, 233, 245),  # Light Blue
+            "header_text": (255, 255, 255),
+            "row_alt_light": (32, 32, 32, 230),
+            "row_alt_dark": (42, 42, 42, 230),
+        },
+        TIER_RECRUIT: {
+            "header_bg": (60, 140, 60, 245),  # Green
+            "header_text": (255, 255, 255),
+            "row_alt_light": (32, 32, 32, 230),
+            "row_alt_dark": (42, 42, 42, 230),
+        },
+    }
+    
+    tier_color = tier_colors.get(lobby.tier, tier_colors[TIER_RECRUIT])
+
+    # Colors
+    bg = (18, 20, 24)
+    panel_bg = (12, 16, 22, 190)
+    table_bg = (24, 28, 34, 235)
+    header_bg = tier_color["header_bg"]
+    row_light = (40, 45, 55, 205)
+    row_dark = (31, 36, 46, 205)
+    border = (124, 136, 158, 255)
+    border_light = (92, 103, 122, 210)
+    text_main = (240, 243, 250)
+    text_sub = (214, 220, 232)
+
+    background_path = (
+        Path(__file__).resolve().parent
+        / "background"
+        / "AoEIV-DynastiesOfTheEast-WatchYourSteppe-1920x1080-1.webp"
+    )
+    try:
+        if background_path.exists():
+            background_img = Image.open(background_path).convert("RGBA")
+            img = ImageOps.fit(background_img, (width, height), method=Image.LANCZOS)
+        else:
+            img = Image.new("RGBA", (width, height), bg)
+    except Exception:
+        img = Image.new("RGBA", (width, height), bg)
+
+    # Apply subtle overlay for better contrast
+    overlay = Image.new("RGBA", (width, height), (8, 10, 14, 138))
+    img.alpha_composite(overlay)
+    draw = ImageDraw.Draw(img)
+
+    try:
+        font_title = ImageFont.truetype("arialbd.ttf", 34)
+        font_subtitle = ImageFont.truetype("arial.ttf", 19)
+        font_header = ImageFont.truetype("arial.ttf", 22)
+        font_header_bold = ImageFont.truetype("arialbd.ttf", 22)
+        font_cell = ImageFont.truetype("arial.ttf", 20)
+    except Exception:
+        font_title = ImageFont.load_default()
+        font_subtitle = ImageFont.load_default()
+        font_header = ImageFont.load_default()
+        font_header_bold = ImageFont.load_default()
+        font_cell = ImageFont.load_default()
+
+    table_x = pad
+    table_y = pad + title_h + subtitle_h
+    table_w = name_col_w + fights_w
+    table_h = header_h + len(player_entries) * row_h
+
+    # Draw top panel + title/subtitle.
+    panel_top = max(10, pad - 8)
+    panel_bottom = table_y + table_h + 10
+    draw.rounded_rectangle(
+        (pad - 10, panel_top, width - pad + 10, panel_bottom),
+        radius=22,
+        fill=panel_bg,
+        outline=(152, 164, 186, 225),
+        width=2,
+    )
+
+    title_text = f"Bảng chia civ - Lobby {lobby.tier} #{lobby.lobby_number}"
+    subtitle_text = f"Trận #{match.id} | Số trận: {count_fight}"
+    title_w = draw.textlength(title_text, font=font_title)
+    subtitle_w = draw.textlength(subtitle_text, font=font_subtitle)
+    draw.text(((width - title_w) / 2, pad + 2), title_text, font=font_title, fill=text_main)
+    draw.text(((width - subtitle_w) / 2, pad + 47), subtitle_text, font=font_subtitle, fill=text_sub)
+
+    # Draw table shell.
+    draw.rectangle((table_x, table_y, table_x + table_w, table_y + table_h), fill=table_bg, outline=border, width=3)
+    
+    # Draw header with tier color
+    draw.rectangle((table_x, table_y, table_x + table_w, table_y + header_h), fill=header_bg)
+    
+    # Divider line below header (stronger)
+    draw.line((table_x, table_y + header_h, table_x + table_w, table_y + header_h), fill=border, width=3)
+
+    # Vertical grid lines - main divider between player names and civs
+    draw.line((table_x + name_col_w, table_y, table_x + name_col_w, table_y + table_h), fill=border, width=2)
+    for i in range(1, count_fight):
+        x = table_x + name_col_w + i * civ_col_w
+        draw.line((x, table_y, x, table_y + table_h), fill=border_light, width=1)
+
+    # Draw alternating row backgrounds
+    for idx in range(len(player_entries)):
+        y = table_y + header_h + idx * row_h
+        row_color = row_light if idx % 2 == 0 else row_dark
+        draw.rectangle((table_x, y, table_x + table_w, y + row_h), fill=row_color)
+
+    # Headers with better styling
+    draw.text((table_x + 16, table_y + 14), "NGƯỜI CHƠI", font=font_header_bold, fill=tier_color["header_text"])
     for i in range(1, count_fight + 1):
-        civ_lines: list[str] = []
-        for _, key in player_entries:
-            player_civs = civs.get(key, [])
-            civ_lines.append(player_civs[i - 1] if i - 1 < len(player_civs) else "—")
-        embed.add_field(name=f"T{i}", value="\n".join(civ_lines) or "\u200b", inline=True)
+        cx = table_x + name_col_w + (i - 1) * civ_col_w + civ_col_w // 2
+        label = f"T{i}"
+        tw = draw.textlength(label, font=font_header_bold)
+        draw.text((cx - tw / 2, table_y + 14), label, font=font_header_bold, fill=tier_color["header_text"])
 
-    # Pad with blank fields so Discord completes the last inline row of three,
-    # keeping columns aligned when total field count is not a multiple of 3.
-    total_fields = 1 + count_fight
-    remainder = total_fields % 3
-    if remainder != 0:
-        for _ in range(3 - remainder):
-            embed.add_field(name="\u200b", value="\u200b", inline=True)
+    emoji_full_re = re.compile(r"^<(?P<anim>a?):(?P<name>[^:]+):(?P<id>\d+)>$")
 
-    embed.set_footer(text=f"Match #{match.id} | ID lobby #{lobby.id}")
-    return embed
+    flags_dir = Path(__file__).resolve().parent / "flags"
+    icon_cache: dict[str, Image.Image] = {}
+
+    def _fetch_emoji_icon_from_cdn(emoji_id: str) -> Image.Image | None:
+        cache_key = f"cdn:{emoji_id}"
+        if cache_key in icon_cache:
+            return icon_cache[cache_key]
+        for ext in ("png", "webp"):
+            url = f"https://cdn.discordapp.com/emojis/{emoji_id}.{ext}?size=64&quality=lossless"
+            try:
+                with urlopen(url, timeout=8) as resp:
+                    raw = resp.read()
+                icon = Image.open(BytesIO(raw)).convert("RGBA")
+                icon_cache[cache_key] = icon
+                return icon
+            except Exception:
+                continue
+        return None
+
+    def _extract_civ_name_and_id(civ_raw: str) -> tuple[str | None, str | None]:
+        full = emoji_full_re.match(civ_raw)
+        if full:
+            return full.group("name"), full.group("id")
+        if civ_raw.startswith(":") and civ_raw.endswith(":") and len(civ_raw) > 2:
+            return civ_raw[1:-1], None
+        return None, None
+
+    def _load_local_flag_icon(civ_name: str) -> Image.Image | None:
+        cache_key = f"local:{civ_name}"
+        if cache_key in icon_cache:
+            return icon_cache[cache_key]
+
+        for ext in ("webp", "png", "jpg", "jpeg"):
+            path = flags_dir / f"{civ_name}.{ext}"
+            if path.exists():
+                try:
+                    icon = Image.open(path).convert("RGBA")
+                    icon_cache[cache_key] = icon
+                    return icon
+                except Exception:
+                    continue
+        return None
+
+    for row_idx, (name, key) in enumerate(player_entries):
+        y_top = table_y + header_h + row_idx * row_h
+        y_center = y_top + row_h // 2
+
+        # Add subtle name column background
+        draw.rectangle((table_x, y_top, table_x + name_col_w, y_top + row_h), 
+                      fill=table_bg)
+
+        disp_name = name if len(name) <= 24 else f"{name[:23]}…"
+        draw.text((table_x + 16, y_center - 11), disp_name, font=font_cell, fill=text_main)
+
+        player_civs = civs.get(key, [])
+        for i in range(count_fight):
+            civ_raw = player_civs[i] if i < len(player_civs) else "—"
+            x_left = table_x + name_col_w + i * civ_col_w
+            cx = x_left + civ_col_w // 2
+
+            icon = None
+            if isinstance(civ_raw, str):
+                civ_name, emoji_id = _extract_civ_name_and_id(civ_raw)
+                if civ_name:
+                    # Prefer local files for speed and stability.
+                    icon = _load_local_flag_icon(civ_name)
+                if icon is None and emoji_id:
+                    icon = _fetch_emoji_icon_from_cdn(emoji_id)
+
+            if icon is not None:
+                max_w = int(civ_col_w * 0.75)
+                max_h = int(row_h * 0.75)
+                scale = min(max_w / icon.width, max_h / icon.height)
+                new_w = max(1, int(icon.width * scale))
+                new_h = max(1, int(icon.height * scale))
+                icon_resized = icon.resize((new_w, new_h), Image.LANCZOS)
+                img.alpha_composite(icon_resized, (int(cx - new_w / 2), int(y_center - new_h / 2)))
+                continue
+
+            text = civ_raw if isinstance(civ_raw, str) and civ_raw else "-"
+            tw = draw.textlength(text, font=font_cell)
+            draw.text((cx - tw / 2, y_center - 11), text, font=font_cell, fill=text_sub)
+
+    # Draw horizontal borders between players on top (so they're visible across all columns)
+    for idx in range(1, len(player_entries) + 1):
+        y = table_y + header_h + idx * row_h
+        draw.line((table_x, y, table_x + table_w, y), fill=border, width=2)
+
+    output = BytesIO()
+    img.save(output, format="PNG")
+    output.seek(0)
+    return discord.File(fp=output, filename=_build_lobby_display_image_filename(lobby, match))
 
 
 # ── Discord channel creation ───────────────────────────────────────────────────
@@ -239,18 +565,27 @@ async def create_lobby_channels(
     (voice_channel_ids, text_channel_ids)
         Lists of Discord channel IDs, indexed by fight number (0-based).
     """
-    # Permission overwrites: hide from everyone by default
-    overwrites: dict = {
+    # Permission overwrites: 
+    voice_overwrites: dict = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=False),
+    }
+    text_overwrites: dict = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
     }
     if judge_role:
-        overwrites[judge_role] = discord.PermissionOverwrite(
-            view_channel=True, connect=True
+        voice_overwrites[judge_role] = discord.PermissionOverwrite(
+            view_channel=True, connect=True, send_messages=True
+        )
+        text_overwrites[judge_role] = discord.PermissionOverwrite(
+            view_channel=True, connect=True, send_messages=True
         )
     for uid in (lobby.users_list or []):
         member = guild.get_member(uid)
         if member:
-            overwrites[member] = discord.PermissionOverwrite(
+            voice_overwrites[member] = discord.PermissionOverwrite(
+                view_channel=True, connect=True, send_messages=True
+            )
+            text_overwrites[member] = discord.PermissionOverwrite(
                 view_channel=True, connect=True, send_messages=True
             )
 
@@ -272,14 +607,14 @@ async def create_lobby_channels(
 
         vc = await guild.create_voice_channel(
             name=f"🎮 Lobby {lobby.tier} #{lobby.lobby_number} · Trận {i}",
-            overwrites=overwrites,
+            overwrites=voice_overwrites,
             category=category,
         )
         voice_ids.append(vc.id)
 
         tc = await guild.create_text_channel(
             name=f"lobby-{tier_short}{lobby.lobby_number}-tran{i}-{map_slug}",
-            overwrites=overwrites,
+            overwrites=text_overwrites,
             category=category,
         )
         text_ids.append(tc.id)
@@ -321,10 +656,25 @@ async def divide_lobbies(
         JUDGE_ROLE_ID,
         LOBBY_CATEGORY_ID,
     )
-    from views import LobbyResultView, build_lobby_result_embed
+    from helpers import now_vn
+    from views import LobbyResultView, build_lobby_result_message_assets
 
     announce_channel = bot.get_channel(DIVIDE_LOBBY_CHANNEL_ID)
     result_channel = bot.get_channel(RESULT_CHANNEL_ID) if RESULT_CHANNEL_ID else None
+
+    async def _announce(*args, **kwargs):
+        if not announce_channel:
+            return None
+        msg = await announce_channel.send(*args, **kwargs)
+        from scheduler import track_divide_message
+
+        track_divide_message(match.id, msg.id)
+        return msg
+
+    async def _send_lobby_display(*args, **kwargs):
+        if not announce_channel:
+            return None
+        return await announce_channel.send(*args, **kwargs)
 
     # Guard: skip if lobbies have already been created for this match
     # (prevents double-execution when the scheduler ticks twice within the same minute)
@@ -336,10 +686,17 @@ async def divide_lobbies(
     checkin_ids: list = match.checkin_users_id or []
     if not checkin_ids:
         if announce_channel:
-            await announce_channel.send(
-                f"⚠️ **Match #{match.id}** – Không có người chơi nào check-in, "
+            await _announce(
+                f"⚠️ **Trận #{match.id}** – Không có người chơi nào check-in, "
                 "không thể chia lobby."
             )
+        with db_session_factory() as session:
+            db_match = session.get(Match, match.id)
+            if db_match is not None:
+                db_match.status = "cancelled"
+                if db_match.end_time is None:
+                    db_match.end_time = now_vn()
+                session.commit()
         return
 
     # ── Step 1 & 2: Split + sort ───────────────────────────────────────────────
@@ -382,16 +739,15 @@ async def divide_lobbies(
 
     if cannot_join_group and announce_channel:
         names = ", ".join(f"<@{uid}>" for uid, _ in cannot_join_group)
-        await announce_channel.send(
-            f"⚠️ **Match #{match.id}** – Những người chơi sau không đủ điều kiện "
+        await _announce(
+            f"⚠️ **Trận #{match.id}** – Những người chơi sau không đủ điều kiện "
             f"tham gia (ELO cao hơn ELO thấp nhất của nhóm có vé nhưng không có vé): "
             f"{names}"
         )
 
     # ── Step 4: Build list of lobby specs ─────────────────────────────────────
     # Each spec: (tier, lobby_number, [user_ids], ai_count)
-    LobbySpec = tuple  # (str, int, list[int], int)
-    lobby_specs: list[LobbySpec] = []
+    lobby_specs: list[tuple[str, int, list[int], int]] = []
 
     def _build_specs(player_ids: list[int], tiers: list[str]) -> None:
         """Slice player_ids into tiered lobbies of MAX_LOBBY_SIZE, appending to lobby_specs."""
@@ -412,8 +768,8 @@ async def divide_lobbies(
                 if announce_channel:
                     # We schedule the coroutine; handled after the loop via gathered messages
                     _pending_cancels.append(
-                        announce_channel.send(
-                            f"❌ **Match #{match.id}** – "
+                        _announce(
+                            f"❌ **Trận #{match.id}** – "
                             f"Lobby {tier} #{lobby_num} bị hủy vì không đủ số người "
                             f"tối thiểu là {MIN_LOBBY_SIZE} (chỉ có {n} người)."
                         )
@@ -434,8 +790,8 @@ async def divide_lobbies(
             if n < MIN_LOBBY_SIZE:
                 if announce_channel:
                     _pending_cancels.append(
-                        announce_channel.send(
-                            f"❌ **Match #{match.id}** – "
+                        _announce(
+                            f"❌ **Trận #{match.id}** – "
                             f"Lobby {TIER_DIAMOND} #{diamond_num} bị hủy vì không đủ "
                             f"số người tối thiểu là {MIN_LOBBY_SIZE} (chỉ có {n} người)."
                         )
@@ -451,8 +807,8 @@ async def divide_lobbies(
     ticket_player_ids = [uid for uid, _ in has_ticket_group]
     if len(ticket_player_ids) < MIN_LOBBY_SIZE and ticket_player_ids:
         if announce_channel:
-            await announce_channel.send(
-                f"❌ **Match #{match.id}** – Nhóm có vé bị hủy vì không đủ số người "
+            await _announce(
+                f"❌ **Trận #{match.id}** – Nhóm có vé bị hủy vì không đủ số người "
                 f"tối thiểu là {MIN_LOBBY_SIZE} (chỉ có {len(ticket_player_ids)} người)."
             )
     elif ticket_player_ids:
@@ -465,8 +821,8 @@ async def divide_lobbies(
     recruit_player_ids = [uid for uid, _ in no_ticket_group]
     if len(recruit_player_ids) < MIN_LOBBY_SIZE and recruit_player_ids:
         if announce_channel:
-            await announce_channel.send(
-                f"❌ **Match #{match.id}** – Nhóm không vé bị hủy vì không đủ số người "
+            await _announce(
+                f"❌ **Trận #{match.id}** – Nhóm không vé bị hủy vì không đủ số người "
                 f"tối thiểu là {MIN_LOBBY_SIZE} (chỉ có {len(recruit_player_ids)} người)."
             )
     elif recruit_player_ids:
@@ -481,8 +837,8 @@ async def divide_lobbies(
             if n < MIN_LOBBY_SIZE:
                 if announce_channel:
                     _pending_cancels.append(
-                        announce_channel.send(
-                            f"❌ **Match #{match.id}** – "
+                        _announce(
+                            f"❌ **Trận #{match.id}** – "
                             f"Lobby {TIER_RECRUIT} #{lobby_num} bị hủy vì không đủ số người "
                             f"tối thiểu là {MIN_LOBBY_SIZE} (chỉ có {n} người)."
                         )
@@ -503,9 +859,16 @@ async def divide_lobbies(
 
     if not lobby_specs:
         if announce_channel:
-            await announce_channel.send(
-                f"⚠️ **Match #{match.id}** – Không có lobby nào được tạo."
+            await _announce(
+                f"⚠️ **Trận #{match.id}** – Không có lobby nào được tạo."
             )
+        with db_session_factory() as session:
+            db_match = session.get(Match, match.id)
+            if db_match is not None:
+                db_match.status = "cancelled"
+                if db_match.end_time is None:
+                    db_match.end_time = now_vn()
+                session.commit()
         return
 
     # ── Step 5: Build player name map ─────────────────────────────────────────
@@ -517,16 +880,22 @@ async def divide_lobbies(
     # ── Step 6: Guild / role / category objects ────────────────────────────────
     guild = bot.guilds[0] if bot.guilds else None
     judge_role = guild.get_role(JUDGE_ROLE_ID) if (guild and JUDGE_ROLE_ID) else None
-    category = (
+    category_obj = (
         guild.get_channel(LOBBY_CATEGORY_ID)
         if (guild and LOBBY_CATEGORY_ID)
         else None
     )
+    category = category_obj if isinstance(category_obj, discord.CategoryChannel) else None
+    if guild and LOBBY_CATEGORY_ID and category is None:
+        log.warning(
+            "Configured LOBBY_CATEGORY_ID=%s is missing or not a category channel",
+            LOBBY_CATEGORY_ID,
+        )
 
     # ── Step 7: Persist lobbies, create channels, post embeds ─────────────────
     if announce_channel:
-        await announce_channel.send(
-            f"✅ **Match #{match.id}** – Bắt đầu chia {len(lobby_specs)} lobby…"
+        await _announce(
+            f"✅ **Trận #{match.id}** – Bắt đầu chia {len(lobby_specs)} lobby…"
         )
 
     # Pre-build emoji map once so we can resolve :name: → <:name:id> per lobby
@@ -541,7 +910,7 @@ async def divide_lobbies(
             civs = assign_civs(all_civ_keys, match.count_fight)
         except ValueError as exc:
             if announce_channel:
-                await announce_channel.send(
+                await _announce(
                     f"⚠️ Không thể chia civ cho Lobby {tier} #{lobby_num}: {exc}"
                 )
             civs = {}
@@ -607,20 +976,54 @@ async def divide_lobbies(
 
         # Send display embed to announce channel (with player @mentions above the embed)
         if announce_channel:
-            display_embed = build_lobby_display_embed(lobby_snap, match_snap, p_map)
             mentions = " ".join(f"<@{uid}>" for uid in (lobby_snap.users_list or []))
-            await announce_channel.send(content=mentions or None, embed=display_embed)
+            display_file = await build_lobby_display_image_file(lobby_snap, match_snap, p_map)
+            display_message_ids: list[int] = []
+            if display_file is not None:
+                display_embed = build_lobby_display_embed(lobby_snap, match_snap)
+                display_msg = await _send_lobby_display(content=mentions or None, embed=display_embed, file=display_file)
+                if display_msg is not None:
+                    display_message_ids.append(display_msg.id)
+            else:
+                display_messages = build_lobby_display_messages(lobby_snap, match_snap, p_map)
+                if display_messages:
+                    fallback_embed = discord.Embed(
+                        title=f"{TIER_EMOJI.get(lobby_snap.tier or '', '🎮')} Chia Lobby - Trận #{match_snap.id}",
+                        description=display_messages[0],
+                        color=discord.Color.blue(),
+                    )
+                    display_msg = await _send_lobby_display(content=mentions or None, embed=fallback_embed)
+                    if display_msg is not None:
+                        display_message_ids.append(display_msg.id)
+                    for extra_message in display_messages[1:]:
+                        extra_msg = await _send_lobby_display(content=extra_message)
+                        if extra_msg is not None:
+                            display_message_ids.append(extra_msg.id)
+
+            if display_message_ids:
+                with db_session_factory() as session:
+                    db_lobby = session.get(Lobby, lobby_id)
+                    if db_lobby is not None:
+                        ids = list(db_lobby.display_message_ids or [])
+                        for message_id in display_message_ids:
+                            if message_id not in ids:
+                                ids.append(message_id)
+                        db_lobby.display_message_ids = ids
+                        session.commit()
 
         # Send result-entry embed + buttons to result channel
         if result_channel:
-            result_embed = build_lobby_result_embed(lobby_snap, match_snap, p_map)
+            result_embed, result_file = build_lobby_result_message_assets(lobby_snap, match_snap, p_map)
             view = LobbyResultView(
                 lobby_id=lobby_id,
                 count_fight=match.count_fight,
                 map_names=match.name_maps or [],
                 db_session_factory=db_session_factory,
             )
-            result_msg = await result_channel.send(embed=result_embed, view=view)
+            if result_file is not None:
+                result_msg = await result_channel.send(embed=result_embed, view=view, file=result_file)
+            else:
+                result_msg = await result_channel.send(embed=result_embed, view=view)
 
             with db_session_factory() as session:
                 db_lobby = session.get(Lobby, lobby_id)

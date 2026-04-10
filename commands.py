@@ -1,5 +1,5 @@
 """
-Slash commands for match management.
+Slash commands for trận management.
 """
 
 import logging
@@ -11,36 +11,97 @@ from discord.ext import commands as ext_commands
 from typing import Optional
 
 from config import GUILD_ID, REGISTER_CHANNEL_ID
-from helpers import now_vn
+from helpers import now_vn, safe_send_interaction, is_interaction_expired
 from views import MapNamesModal
 
 log = logging.getLogger(__name__)
 guild_obj = discord.Object(id=GUILD_ID)
 
 
-def _is_interaction_expired(exc: discord.NotFound) -> bool:
-    return exc.code == 10062
-
-
-async def _safe_send(interaction: discord.Interaction, context: str, *args, **kwargs) -> None:
-    """Send an interaction response, logging timeout/HTTP errors instead of propagating."""
-    try:
-        await interaction.response.send_message(*args, **kwargs)
-    except discord.NotFound as exc:
-        if _is_interaction_expired(exc):
-            log.warning("Interaction expired (%s, user=%s)", context, interaction.user.id)
-        else:
-            log.error("NotFound sending response (%s, user=%s): %s", context, interaction.user.id, exc)
-    except discord.HTTPException as exc:
-        log.error("HTTP error sending response (%s, user=%s): %s", context, interaction.user.id, exc)
-
-
 def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
-    """Attach all match-related slash commands to *bot*."""
+    """Attach all trận-related slash commands to *bot*."""
+
+    async def _change_ticket(
+        interaction: discord.Interaction,
+        player: discord.Member,
+        amount: int,
+        *,
+        add: bool,
+        context: str,
+    ) -> None:
+        from entity import User
+
+        if amount <= 0:
+            await safe_send_interaction(
+                interaction,
+                context,
+                "❌ Số vé phải lớn hơn 0.",
+                ephemeral=True,
+            )
+            return
+
+        action = "thêm" if add else "xóa"
+        try:
+            with db_session_factory() as session:
+                user = session.get(User, player.id)
+                if user is None:
+                    missing_profile_msg = (
+                        f"❌ Người chơi {player.mention} chưa có hồ sơ. "
+                        "Hãy yêu cầu họ dùng `/set_ingame_name` trước."
+                        if add
+                        else f"❌ Người chơi {player.mention} chưa có hồ sơ."
+                    )
+                    await safe_send_interaction(
+                        interaction,
+                        context,
+                        missing_profile_msg,
+                        ephemeral=True,
+                    )
+                    return
+
+                if add:
+                    user.ticket += amount
+                else:
+                    if user.ticket < amount:
+                        await safe_send_interaction(
+                            interaction,
+                            context,
+                            f"❌ {player.mention} chỉ có **{user.ticket}** vé, "
+                            f"không đủ để xóa **{amount}** vé.",
+                            ephemeral=True,
+                        )
+                        return
+                    user.ticket -= amount
+
+                new_total = user.ticket
+                session.commit()
+        except Exception:
+            log.exception(
+                "DB error in %s (admin=%s, player=%s)",
+                context,
+                interaction.user.id,
+                player.id,
+            )
+            await safe_send_interaction(
+                interaction,
+                context,
+                "❌ Đã xảy ra lỗi nội bộ khi lưu dữ liệu.",
+                ephemeral=True,
+            )
+            return
+
+        done_msg = (
+            f"✅ Đã thêm **{amount}** vé cho {player.mention}. "
+            f"Tổng vé hiện tại: **{new_total}**."
+            if add
+            else f"✅ Đã xóa **{amount}** vé của {player.mention}. "
+            f"Tổng vé còn lại: **{new_total}**."
+        )
+        await safe_send_interaction(interaction, context, done_msg, ephemeral=True)
 
     @bot.tree.command(
         name="open_registration",
-        description="Mở đăng ký cho một FFA match mới.",
+        description="Mở đăng ký cho một FFA trận mới.",
         guild=guild_obj,
     )
     @app_commands.describe(
@@ -56,10 +117,10 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         time_reach_checkin: str,
         time_reach_divide_lobby: str,
     ) -> None:
-        """Open registration for a new FFA match."""
+        """Open registration for a new FFA trận."""
 
         if count_fight < 1 or count_fight > 5:
-            await _safe_send(
+            await safe_send_interaction(
                 interaction, "open_registration",
                 "❌ Số trận đánh phải từ 1 đến 5.", ephemeral=True,
             )
@@ -71,7 +132,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                 "open_registration: register channel %s not found (user=%s)",
                 REGISTER_CHANNEL_ID, interaction.user.id,
             )
-            await _safe_send(
+            await safe_send_interaction(
                 interaction, "open_registration",
                 "❌ Không tìm thấy kênh đăng ký. Vui lòng kiểm tra cấu hình.", ephemeral=True,
             )
@@ -88,7 +149,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         try:
             await interaction.response.send_modal(modal)
         except discord.NotFound as exc:
-            if _is_interaction_expired(exc):
+            if is_interaction_expired(exc):
                 log.warning(
                     "Interaction expired sending open_registration modal (user=%s)",
                     interaction.user.id,
@@ -203,8 +264,8 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                         delta = elo - user.elo
                         user.elo = elo
                         user.last_elo_change = delta
-                        if delta > 0:
-                            user.monthly_elo_gain = (user.monthly_elo_gain or 0) + delta
+                        user.updated_date = now_vn()
+                        user.monthly_elo_gain = (user.monthly_elo_gain or 0) + delta
                     msg = f"✅ Đã cập nhật hồ sơ cho {player.mention}: tên in-game **{name}**"
                     if elo is not None:
                         msg += f", ELO: **{elo}**"
@@ -212,13 +273,13 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                 session.commit()
         except Exception as exc:
             log.exception("DB error in set_ingame_name (admin=%s, player=%s)", interaction.user.id, player.id)
-            await _safe_send(
+            await safe_send_interaction(
                 interaction, "set_ingame_name",
                 "❌ Đã xảy ra lỗi nội bộ khi lưu dữ liệu.", ephemeral=True,
             )
             return
 
-        await _safe_send(interaction, "set_ingame_name", msg, ephemeral=True)
+        await safe_send_interaction(interaction, "set_ingame_name", msg, ephemeral=True)
 
     # ── Admin: add ticket ──────────────────────────────────────────────────────
 
@@ -235,46 +296,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         amount: int = 1,
     ) -> None:
         """Admin: add *amount* tickets to a player's account."""
-        from entity import User
-
-        if amount <= 0:
-            await _safe_send(
-                interaction, "add_ticket",
-                "❌ Số vé phải lớn hơn 0.", ephemeral=True,
-            )
-            return
-
-        try:
-            with db_session_factory() as session:
-                user = session.get(User, player.id)
-                if user is None:
-                    await _safe_send(
-                        interaction, "add_ticket",
-                        f"❌ Người chơi {player.mention} chưa có hồ sơ. "
-                        "Hãy yêu cầu họ dùng `/set_ingame_name` trước.",
-                        ephemeral=True,
-                    )
-                    return
-                user.ticket += amount
-                new_total = user.ticket
-                session.commit()
-        except Exception as exc:
-            log.exception(
-                "DB error in add_ticket (admin=%s, player=%s)",
-                interaction.user.id, player.id,
-            )
-            await _safe_send(
-                interaction, "add_ticket",
-                "❌ Đã xảy ra lỗi nội bộ khi lưu dữ liệu.", ephemeral=True,
-            )
-            return
-
-        await _safe_send(
-            interaction, "add_ticket",
-            f"✅ Đã thêm **{amount}** vé cho {player.mention}. "
-            f"Tổng vé hiện tại: **{new_total}**.",
-            ephemeral=True,
-        )
+        await _change_ticket(interaction, player, amount, add=True, context="add_ticket")
 
     # ── Admin: remove ticket ───────────────────────────────────────────────────
 
@@ -291,92 +313,74 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         amount: int = 1,
     ) -> None:
         """Admin: remove *amount* tickets from a player's account."""
-        from entity import User
-
-        if amount <= 0:
-            await _safe_send(
-                interaction, "remove_ticket",
-                "❌ Số vé phải lớn hơn 0.", ephemeral=True,
-            )
-            return
-
-        try:
-            with db_session_factory() as session:
-                user = session.get(User, player.id)
-                if user is None:
-                    await _safe_send(
-                        interaction, "remove_ticket",
-                        f"❌ Người chơi {player.mention} chưa có hồ sơ.",
-                        ephemeral=True,
-                    )
-                    return
-                if user.ticket < amount:
-                    await _safe_send(
-                        interaction, "remove_ticket",
-                        f"❌ {player.mention} chỉ có **{user.ticket}** vé, "
-                        f"không đủ để xóa **{amount}** vé.",
-                        ephemeral=True,
-                    )
-                    return
-                user.ticket -= amount
-                new_total = user.ticket
-                session.commit()
-        except Exception as exc:
-            log.exception(
-                "DB error in remove_ticket (admin=%s, player=%s)",
-                interaction.user.id, player.id,
-            )
-            await _safe_send(
-                interaction, "remove_ticket",
-                "❌ Đã xảy ra lỗi nội bộ khi lưu dữ liệu.", ephemeral=True,
-            )
-            return
-
-        await _safe_send(
-            interaction, "remove_ticket",
-            f"✅ Đã xóa **{amount}** vé của {player.mention}. "
-            f"Tổng vé còn lại: **{new_total}**.",
-            ephemeral=True,
-        )
+        await _change_ticket(interaction, player, amount, add=False, context="remove_ticket")
 
     # ── View player FFA stats ─────────────────────────────────────────────────
 
-    @bot.tree.command(
-        name="view_ffa",
-        description="Xem thông tin FFA của một người chơi.",
-        guild=guild_obj,
-    )
-    @app_commands.describe(player="Người chơi cần xem thông tin")
-    async def view_ffa(
+    async def _send_ffa_profile(
         interaction: discord.Interaction,
-        player: discord.Member,
+        player: discord.abc.User,
+        *,
+        context: str,
     ) -> None:
-        """Display a rich embed with a player's FFA stats."""
-        from entity import User
+        """Build and send a player's FFA profile embed."""
+        from entity import Lobby, User
         from helpers import get_rank
+
+        def _to_int(value: object) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return 0
 
         try:
             with db_session_factory() as session:
                 user = session.get(User, player.id)
-        except Exception as exc:
+                lobbies: list[Lobby] = (
+                    session.query(Lobby)
+                    .filter(Lobby.status == "finished")
+                    .filter(Lobby.users_list.contains([player.id]))
+                    .all()
+                )
+        except Exception:
             log.exception(
-                "DB error in view_ffa (requester=%s, player=%s)",
-                interaction.user.id, player.id,
+                "DB error in %s (requester=%s, player=%s)",
+                context,
+                interaction.user.id,
+                player.id,
             )
-            await _safe_send(
-                interaction, "view_ffa",
-                "❌ Đã xảy ra lỗi nội bộ khi truy vấn dữ liệu.", ephemeral=True,
+            await safe_send_interaction(
+                interaction,
+                context,
+                "❌ Đã xảy ra lỗi nội bộ khi truy vấn dữ liệu.",
+                ephemeral=True,
             )
             return
 
         if user is None:
-            await _safe_send(
-                interaction, "view_ffa",
+            await safe_send_interaction(
+                interaction,
+                context,
                 f"❌ {player.mention} chưa có hồ sơ FFA. "
-                "Hãy yêu cầu họ dùng `/set_ingame_name` trước.",
+                "Vui lòng tạo profile cho họ bằng lệnh /set_ingame_name.",
                 ephemeral=True,
             )
             return
+
+        played_match_ids: set[int] = set()
+        best_single_fight_score = 0
+        for lobby in lobbies:
+            played_match_ids.add(int(lobby.match_id))
+
+            score_map = lobby.scores or {}
+            for fight_scores in score_map.values():
+                if not isinstance(fight_scores, dict):
+                    continue
+                fight_score = _to_int(fight_scores.get(str(player.id), 0))
+                if fight_score > best_single_fight_score:
+                    best_single_fight_score = fight_score
+
+        total_matches_played = len(played_match_ids)
 
         # Format last ELO change indicator
         change = user.last_elo_change or 0
@@ -387,8 +391,21 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         else:
             change_str = "—"
 
-        monthly = user.monthly_elo_gain or 0
-        monthly_str = f"🔥 +{monthly}" if monthly > 0 else "—"
+        # Format monthly ELO gain — only valid if last updated in current month
+        now = now_vn()
+        current_month = (now.year, now.month)
+        update_month = (user.updated_date.year, user.updated_date.month) if user.updated_date else None
+        
+        if update_month == current_month:
+            monthly = user.monthly_elo_gain or 0
+            if monthly > 0:
+                monthly_str = f"🔥 +{monthly}"
+            elif monthly < 0:
+                monthly_str = f"📉 {monthly}"
+            else:
+                monthly_str = "—"
+        else:
+            monthly_str = "—"
 
         rank_str = get_rank(user.elo)
 
@@ -403,6 +420,8 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         embed.add_field(name="🎫 Vé", value=str(user.ticket), inline=True)
         embed.add_field(name="📈 Biến động gần nhất", value=change_str, inline=True)
         embed.add_field(name="🔥 ELO tăng tháng này", value=monthly_str, inline=True)
+        embed.add_field(name="🎮 Tổng số trận đã tham gia", value=str(total_matches_played), inline=True)
+        embed.add_field(name="🏆 Điểm số cao nhất 1 trận", value=str(best_single_fight_score), inline=True)
         embed.add_field(
             name="📅 Tham gia từ",
             value=user.created_date.strftime("%d/%m/%Y") if user.created_date else "—",
@@ -410,24 +429,29 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         )
         embed.set_footer(text=f"Discord ID: {player.id}")
 
-        try:
-            await interaction.response.send_message(embed=embed)
-        except discord.NotFound as exc:
-            if exc.code == 10062:
-                log.warning(
-                    "Interaction expired for view_ffa (requester=%s, player=%s)",
-                    interaction.user.id, player.id,
-                )
-            else:
-                log.error(
-                    "NotFound sending view_ffa embed (requester=%s, player=%s): %s",
-                    interaction.user.id, player.id, exc,
-                )
-        except discord.HTTPException as exc:
-            log.error(
-                "HTTP error sending view_ffa embed (requester=%s, player=%s): %s",
-                interaction.user.id, player.id, exc,
-            )
+        await safe_send_interaction(interaction, context, embed=embed)
+
+    @bot.tree.command(
+        name="view_ffa",
+        description="Xem thông tin FFA của một người chơi.",
+        guild=guild_obj,
+    )
+    @app_commands.describe(player="Người chơi cần xem thông tin")
+    async def view_ffa(
+        interaction: discord.Interaction,
+        player: discord.Member,
+    ) -> None:
+        """Display a rich embed with a player's FFA stats."""
+        await _send_ffa_profile(interaction, player, context="view_ffa")
+
+    @bot.tree.command(
+        name="ffa_me",
+        description="Xem thông tin FFA của chính bạn.",
+        guild=guild_obj,
+    )
+    async def ffa_me(interaction: discord.Interaction) -> None:
+        """Display a rich embed with the invoker's own FFA stats."""
+        await _send_ffa_profile(interaction, interaction.user, context="ffa_me")
 
     # ── Admin: test full flow ─────────────────────────────────────────────────
 
@@ -451,14 +475,18 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             LobbyResultView,
             build_registration_embed,
             build_checkin_embed,
-            build_lobby_result_embed,
+            build_lobby_result_message_assets,
             build_disabled_registration_view,
             build_disabled_checkin_view,
+            build_registered_mentions,
         )
         from lobby_division import (
             assign_civs,
             TIER_RECRUIT,
+            create_lobby_channels,
             build_lobby_display_embed,
+            build_lobby_display_messages,
+            build_lobby_display_image_file,
             _build_emoji_map,
             _resolve_emoji_str,
         )
@@ -467,10 +495,25 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             CHECKIN_CHANNEL_ID as _CHECKIN_CH,
             DIVIDE_LOBBY_CHANNEL_ID as _DIVIDE_CH,
             RESULT_CHANNEL_ID as _RESULT_CH,
+            JUDGE_ROLE_ID as _JUDGE_ROLE_ID,
+            LOBBY_CATEGORY_ID as _LOBBY_CATEGORY_ID,
         )
 
         admin_id = interaction.user.id
-        await interaction.response.defer(ephemeral=True)
+
+        async def _send_testflow_msg(message: str) -> None:
+            """Send ephemeral status/error text regardless of interaction state."""
+            await safe_send_interaction(interaction, "test_flow", message, ephemeral=True)
+
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except discord.HTTPException as exc:
+                # 40060: response was already acknowledged elsewhere.
+                if exc.code != 40060:
+                    log.error("test_flow: failed to defer interaction (user=%s): %s", admin_id, exc)
+                    await _send_testflow_msg("❌ Không thể bắt đầu test flow do lỗi phản hồi interaction.")
+                    return
 
         # ── 1. Ensure admin has a user profile ─────────────────────────────────
         ingame_name = interaction.user.display_name
@@ -490,7 +533,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                     ingame_name = admin_user.ingame_name or ingame_name
         except Exception:
             log.exception("test_flow: DB error ensuring user profile (user=%s)", admin_id)
-            await interaction.followup.send("❌ Lỗi DB khi kiểm tra hồ sơ người dùng.", ephemeral=True)
+            await _send_testflow_msg("❌ Lỗi DB khi kiểm tra hồ sơ người dùng.")
             return
 
         # ── 2. Create match ────────────────────────────────────────────────────
@@ -499,8 +542,8 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                 match = Match(
                     register_users_id=[admin_id],
                     checkin_users_id=[admin_id],
-                    name_maps=["Map 1", "Map 2", "Map 3", "Map 4"],
-                    count_fight=4,
+                    name_maps=["Map 1", "Map 2", "Map 3"],
+                    count_fight=3,
                     time_start=now_vn() + timedelta(hours=2),
                     time_reach_checkin="2h",
                     time_reach_divide_lobby="1h",
@@ -512,7 +555,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                 match_id = match.id
         except Exception:
             log.exception("test_flow: DB error creating match (user=%s)", admin_id)
-            await interaction.followup.send("❌ Lỗi DB khi tạo match.", ephemeral=True)
+            await _send_testflow_msg("❌ Lỗi DB khi tạo trận.")
             return
 
         p_map = {admin_id: ingame_name}
@@ -540,7 +583,12 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                 with db_session_factory() as session:
                     db_match = session.get(Match, match_id)
                     checkin_embed = build_checkin_embed(db_match, p_map, ended=True)
-                checkin_msg = await checkin_channel.send(embed=checkin_embed, view=build_disabled_checkin_view())
+                    registered_mentions = build_registered_mentions(db_match.register_users_id if db_match else [])
+                checkin_msg = await checkin_channel.send(
+                    content=registered_mentions,
+                    embed=checkin_embed,
+                    view=build_disabled_checkin_view(),
+                )
                 with db_session_factory() as session:
                     db_match = session.get(Match, match_id)
                     if db_match:
@@ -553,7 +601,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         ai_count = 7
         all_civ_keys = [str(admin_id)] + [f"AI_{i}" for i in range(1, ai_count + 1)]
         try:
-            civs = assign_civs(all_civ_keys, 4)
+            civs = assign_civs(all_civ_keys, 6)
         except (ValueError, Exception):
             log.exception("test_flow: civ assignment failed (match=%s)", match_id)
             civs = {}
@@ -587,8 +635,40 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                 lobby_id = lobby.id
         except Exception:
             log.exception("test_flow: DB error creating lobby (match=%s)", match_id)
-            await interaction.followup.send("❌ Lỗi DB khi tạo lobby.", ephemeral=True)
+            await _send_testflow_msg("❌ Lỗi DB khi tạo lobby.")
             return
+
+        # Create voice + text channels like the normal lobby-division flow.
+        if interaction.guild:
+            try:
+                guild = interaction.guild
+                judge_role = guild.get_role(_JUDGE_ROLE_ID) if _JUDGE_ROLE_ID else None
+                category_obj = guild.get_channel(_LOBBY_CATEGORY_ID) if _LOBBY_CATEGORY_ID else None
+                category = category_obj if isinstance(category_obj, discord.CategoryChannel) else None
+
+                if _LOBBY_CATEGORY_ID and category is None:
+                    log.warning(
+                        "test_flow: configured LOBBY_CATEGORY_ID=%s is missing or not a category channel",
+                        _LOBBY_CATEGORY_ID,
+                    )
+
+                with db_session_factory() as session:
+                    db_lobby = session.get(Lobby, lobby_id)
+                    db_match = session.get(Match, match_id)
+                    if db_lobby and db_match:
+                        voice_ids, text_ids = await create_lobby_channels(
+                            guild,
+                            db_lobby,
+                            db_match,
+                            p_map,
+                            category,
+                            judge_role,
+                        )
+                        db_lobby.voice_channel_ids = voice_ids
+                        db_lobby.text_channel_ids = text_ids
+                        session.commit()
+            except Exception:
+                log.exception("test_flow: channel creation failed (lobby=%s)", lobby_id)
 
         # Update match status to dividing
         try:
@@ -604,31 +684,68 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         divide_channel = interaction.client.get_channel(_DIVIDE_CH) if _DIVIDE_CH else None
         if divide_channel:
             try:
+                display_messages: list[str] = []
+                display_file = None
+                mentions = ""
                 with db_session_factory() as session:
                     db_lobby = session.get(Lobby, lobby_id)
                     db_match = session.get(Match, match_id)
                     if db_lobby and db_match:
-                        display_embed = build_lobby_display_embed(db_lobby, db_match, p_map)
-                await divide_channel.send(embed=display_embed)
+                        mentions = " ".join(f"<@{uid}>" for uid in (db_lobby.users_list or []))
+                        display_file = await build_lobby_display_image_file(db_lobby, db_match, p_map)
+                        if display_file is None:
+                            display_messages = build_lobby_display_messages(db_lobby, db_match, p_map)
+                if display_file is not None:
+                    if db_lobby:
+                        display_embed = build_lobby_display_embed(db_lobby, db_match)
+                    else:
+                        display_embed = discord.Embed(
+                            title=f"🎮 Chia Lobby - Trận #{match_id}",
+                            description="Không thể tải thông tin lobby.",
+                            color=discord.Color.blue(),
+                        )
+                    await divide_channel.send(content=mentions or None, embed=display_embed, file=display_file)
+                else:
+                    if display_messages:
+                        fallback_embed = discord.Embed(
+                            title=f"🎮 Chia Lobby - Trận #{match_id}",
+                            description=display_messages[0],
+                            color=discord.Color.blue(),
+                        )
+                        await divide_channel.send(content=mentions or None, embed=fallback_embed)
+                        for extra_message in display_messages[1:]:
+                            await divide_channel.send(content=extra_message)
             except Exception:
-                log.exception("test_flow: failed to send lobby display embed (lobby=%s)", lobby_id)
+                log.exception("test_flow: failed to send lobby display message (lobby=%s)", lobby_id)
 
         # ── 7. Post result entry embed with interactive buttons ────────────────
         result_channel = interaction.client.get_channel(_RESULT_CH) if _RESULT_CH else None
         if result_channel:
             try:
+                result_embed = None
+                result_file = None
+                db_match = None
+                p_map = None
                 with db_session_factory() as session:
                     db_lobby = session.get(Lobby, lobby_id)
                     db_match = session.get(Match, match_id)
                     if db_lobby and db_match:
-                        result_embed = build_lobby_result_embed(db_lobby, db_match)
+                        users_list = db_lobby.users_list or []
+                        users = session.query(User).filter(User.id.in_(users_list)).all() if users_list else []
+                        p_map = {u.id: (u.ingame_name or "Unknown") for u in users}
+                        result_embed, result_file = build_lobby_result_message_assets(db_lobby, db_match, p_map)
+                if result_embed is None:
+                    raise RuntimeError(f"Cannot build result embed for lobby #{lobby_id}")
                 result_view = LobbyResultView(
                     lobby_id=lobby_id,
-                    count_fight=4,
-                    map_names=["Map 1", "Map 2", "Map 3", "Map 4"],
+                    count_fight=(db_match.count_fight if db_match else 6),
+                    map_names=(db_match.name_maps if db_match else []),
                     db_session_factory=db_session_factory,
                 )
-                result_msg = await result_channel.send(embed=result_embed, view=result_view)
+                if result_file is not None:
+                    result_msg = await result_channel.send(embed=result_embed, view=result_view, file=result_file)
+                else:
+                    result_msg = await result_channel.send(embed=result_embed, view=result_view)
                 with db_session_factory() as session:
                     db_lobby = session.get(Lobby, lobby_id)
                     if db_lobby:
@@ -637,112 +754,143 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             except Exception:
                 log.exception("test_flow: failed to send result embed (lobby=%s)", lobby_id)
 
-        await interaction.followup.send(
+        await _send_testflow_msg(
             f"✅ **Test Flow hoàn tất!**\n"
-            f"• Match ID: **#{match_id}**\n"
+            f"• ID trận: **#{match_id}**\n"
             f"• Người chơi thật: {interaction.user.mention} (in-game: **{ingame_name}**)\n"
             f"• AI slots: **7**\n"
-            f"• Số trận: **4** (Map 1 → Map 4)\n"
+            f"• Số trận: **6** (Map 1 → Map 6)\n"
             f"• Lobby **{TIER_RECRUIT} #1** đã được tạo.\n"
             f"• Vào kênh kết quả để nhập điểm và test nút **Chốt Kết Quả ✅**.",
-            ephemeral=True,
         )
 
     # ── Emoji test ────────────────────────────────────────────────────────────
 
-    @bot.tree.command(
-        name="emojitest",
-        description="Kiểm tra chuỗi emoji custom: nhập chuỗi bất kỳ, bot sẽ gửi lại trong embed để xem kết quả.",
-        guild=guild_obj,
-    )
-    @app_commands.describe(text="Chuỗi cần kiểm tra (VD: <:ten_emoji:123456789>)")
-    async def emojitest(interaction: discord.Interaction, text: str) -> None:
-        """Echo *text* back inside an embed so the user can verify custom emoji strings."""
-        embed = discord.Embed(
-            title="🔍 Kiểm Tra Emoji",
-            description=text,
-            color=discord.Color.og_blurple(),
-        )
-        embed.add_field(name="Chuỗi gốc (raw)", value=f"`{discord.utils.escape_markdown(text)}`", inline=False)
-        embed.set_footer(text=f"Yêu cầu bởi {interaction.user.display_name}")
-        await _safe_send(interaction, "emojitest", embed=embed)
+    # @bot.tree.command(
+    #     name="emojitest",
+    #     description="Kiểm tra chuỗi emoji custom: nhập chuỗi bất kỳ, bot sẽ gửi lại trong embed để xem kết quả.",
+    #     guild=guild_obj,
+    # )
+    # @app_commands.describe(text="Chuỗi cần kiểm tra (VD: <:ten_emoji:123456789>)")
+    # async def emojitest(interaction: discord.Interaction, text: str) -> None:
+    #     """Echo *text* back inside an embed so the user can verify custom emoji strings."""
+    #     embed = discord.Embed(
+    #         title="🔍 Kiểm Tra Emoji",
+    #         description=text,
+    #         color=discord.Color.og_blurple(),
+    #     )
+    #     embed.add_field(name="Chuỗi gốc (raw)", value=f"`{discord.utils.escape_markdown(text)}`", inline=False)
+    #     embed.set_footer(text=f"Yêu cầu bởi {interaction.user.display_name}")
+    #     await safe_send_interaction(interaction, "emojitest", embed=embed)
 
-    # ── Emoji find ────────────────────────────────────────────────────────────
+    # # ── Generic embed echo ───────────────────────────────────────────────────
 
-    @bot.tree.command(
-        name="emojifind",
-        description="Tìm emoji custom theo tên trong server và hiển thị mã của nó.",
-        guild=guild_obj,
-    )
-    @app_commands.describe(name="Tên emoji cần tìm (không cần dấu ngoặc hay dấu hai chấm)")
-    async def emojifind(interaction: discord.Interaction, name: str) -> None:
-        """Search the guild's custom emojis by name and return their codes."""
-        if interaction.guild is None:
-            await _safe_send(interaction, "emojifind", "❌ Lệnh này chỉ dùng được trong server.", ephemeral=True)
-            return
+    # @bot.tree.command(
+    #     name="embed_echo",
+    #     description="In ra một embed với nội dung chuỗi bạn nhập.",
+    #     guild=guild_obj,
+    # )
+    # @app_commands.describe(text="Nội dung muốn hiển thị trong embed")
+    # async def embed_echo(interaction: discord.Interaction, text: str) -> None:
+    #     """Render user-provided text in a simple embed for quick testing."""
+    #     content = text.strip()
+    #     if not content:
+    #         await safe_send_interaction(interaction, "embed_echo", "❌ Vui lòng nhập nội dung không rỗng.", ephemeral=True)
+    #         return
 
-        query = name.lower().strip()
-        matches = [e for e in interaction.guild.emojis if query in e.name.lower()]
+    #     if len(content) > 4000:
+    #         await safe_send_interaction(
+    #             interaction,
+    #             "embed_echo",
+    #             "❌ Nội dung quá dài cho phần mô tả embed (tối đa 4000 ký tự).",
+    #             ephemeral=True,
+    #         )
+    #         return
 
-        if not matches:
-            await _safe_send(
-                interaction, "emojifind",
-                f"❌ Không tìm thấy emoji nào chứa tên **{discord.utils.escape_markdown(name)}** trong server.",
-                ephemeral=True,
-            )
-            return
+    #     embed = discord.Embed(
+    #         title="🧪 Embed Echo",
+    #         description="<:tughlaq_dynasty:1490419988157431929> <:tughlaq_dynasty:1490419988157431929> <:tughlaq_dynasty:1490419988157431929> <:tughlaq_dynasty:1490419988157431929> <:tughlaq_dynasty:1490419988157431929> <:tughlaq_dynasty:1490419988157431929> <:tughlaq_dynasty:1490419988157431929> <:tughlaq_dynasty:1490419988157431929> <:tughlaq_dynasty:1490419988157431929> xin chào tổ quốc tôi yêu mến",
+    #         color=discord.Color.blurple(),
+    #     )
+    #     embed.set_footer(text=f"Yêu cầu bởi {interaction.user.display_name}")
+    #     await safe_send_interaction(interaction, "embed_echo", embed=embed)
 
-        lines = [f"{e}  →  `{e}`" for e in matches[:25]]
-        embed = discord.Embed(
-            title=f"🔎 Kết Quả Tìm Emoji — \"{name}\"",
-            description="\n".join(lines),
-            color=discord.Color.green(),
-        )
-        embed.set_footer(text=f"Tìm thấy {len(matches)} kết quả{' (hiển thị 25 đầu tiên)' if len(matches) > 25 else ''}")
-        await _safe_send(interaction, "emojifind", embed=embed)
+    # # ── Emoji find ────────────────────────────────────────────────────────────
 
-    # ── Emoji list ────────────────────────────────────────────────────────────
+    # @bot.tree.command(
+    #     name="emojifind",
+    #     description="Tìm emoji custom theo tên trong server và hiển thị mã của nó.",
+    #     guild=guild_obj,
+    # )
+    # @app_commands.describe(name="Tên emoji cần tìm (không cần dấu ngoặc hay dấu hai chấm)")
+    # async def emojifind(interaction: discord.Interaction, name: str) -> None:
+    #     """Search the guild's custom emojis by name and return their codes."""
+    #     if interaction.guild is None:
+    #         await safe_send_interaction(interaction, "emojifind", "❌ Lệnh này chỉ dùng được trong server.", ephemeral=True)
+    #         return
 
-    @bot.tree.command(
-        name="emojilist",
-        description="Liệt kê toàn bộ emoji custom của server kèm mã sử dụng.",
-        guild=guild_obj,
-    )
-    async def emojilist(interaction: discord.Interaction) -> None:
-        """List all custom emojis in the guild with their raw codes."""
-        if interaction.guild is None:
-            await _safe_send(interaction, "emojilist", "❌ Lệnh này chỉ dùng được trong server.", ephemeral=True)
-            return
+    #     query = name.lower().strip()
+    #     matches = [e for e in interaction.guild.emojis if query in e.name.lower()]
 
-        emojis = interaction.guild.emojis
-        if not emojis:
-            await _safe_send(interaction, "emojilist", "ℹ️ Server chưa có emoji custom nào.", ephemeral=True)
-            return
+    #     if not matches:
+    #         await safe_send_interaction(
+    #             interaction, "emojifind",
+    #             f"❌ Không tìm thấy emoji nào chứa tên **{discord.utils.escape_markdown(name)}** trong server.",
+    #             ephemeral=True,
+    #         )
+    #         return
 
-        # Split into pages of 20 to stay within embed limits
-        page_size = 20
-        pages = [emojis[i:i + page_size] for i in range(0, len(emojis), page_size)]
-        embeds = []
-        for idx, page in enumerate(pages, start=1):
-            lines = [f"{e}  `{e}`" for e in page]
-            embed = discord.Embed(
-                title=f"😀 Danh Sách Emoji Server ({len(emojis)} emoji)",
-                description="\n".join(lines),
-                color=discord.Color.blurple(),
-            )
-            if len(pages) > 1:
-                embed.set_footer(text=f"Trang {idx}/{len(pages)}")
-            embeds.append(embed)
+    #     lines = [f"{e}  →  `{e}`" for e in matches[:25]]
+    #     embed = discord.Embed(
+    #         title=f"🔎 Kết Quả Tìm Emoji — \"{name}\"",
+    #         description="\n".join(lines),
+    #         color=discord.Color.green(),
+    #     )
+    #     embed.set_footer(text=f"Tìm thấy {len(matches)} kết quả{' (hiển thị 25 đầu tiên)' if len(matches) > 25 else ''}")
+    #     await safe_send_interaction(interaction, "emojifind", embed=embed)
 
-        # Send first embed as the response, remaining as follow-ups
-        try:
-            await interaction.response.send_message(embed=embeds[0])
-            for extra_embed in embeds[1:]:
-                await interaction.followup.send(embed=extra_embed)
-        except discord.NotFound as exc:
-            if exc.code == 10062:
-                log.warning("Interaction expired for emojilist (user=%s)", interaction.user.id)
-            else:
-                log.error("NotFound in emojilist (user=%s): %s", interaction.user.id, exc)
-        except discord.HTTPException as exc:
-            log.error("HTTP error in emojilist (user=%s): %s", interaction.user.id, exc)
+    # # ── Emoji list ────────────────────────────────────────────────────────────
+
+    # @bot.tree.command(
+    #     name="emojilist",
+    #     description="Liệt kê toàn bộ emoji custom của server kèm mã sử dụng.",
+    #     guild=guild_obj,
+    # )
+    # async def emojilist(interaction: discord.Interaction) -> None:
+    #     """List all custom emojis in the guild with their raw codes."""
+    #     if interaction.guild is None:
+    #         await safe_send_interaction(interaction, "emojilist", "❌ Lệnh này chỉ dùng được trong server.", ephemeral=True)
+    #         return
+
+    #     emojis = interaction.guild.emojis
+    #     if not emojis:
+    #         await safe_send_interaction(interaction, "emojilist", "ℹ️ Server chưa có emoji custom nào.", ephemeral=True)
+    #         return
+
+    #     # Split into pages of 20 to stay within embed limits
+    #     page_size = 20
+    #     pages = [emojis[i:i + page_size] for i in range(0, len(emojis), page_size)]
+    #     embeds = []
+    #     for idx, page in enumerate(pages, start=1):
+    #         lines = [f"{e}  `{e}`" for e in page]
+    #         embed = discord.Embed(
+    #             title=f"😀 Danh Sách Emoji Server ({len(emojis)} emoji)",
+    #             description="\n".join(lines),
+    #             color=discord.Color.blurple(),
+    #         )
+    #         if len(pages) > 1:
+    #             embed.set_footer(text=f"Trang {idx}/{len(pages)}")
+    #         embeds.append(embed)
+
+    #     # Send first embed as the response, remaining as follow-ups
+    #     try:
+    #         await interaction.response.send_message(embed=embeds[0])
+    #         for extra_embed in embeds[1:]:
+    #             await interaction.followup.send(embed=extra_embed)
+    #     except discord.NotFound as exc:
+    #         if exc.code == 10062:
+    #             log.warning("Interaction expired for emojilist (user=%s)", interaction.user.id)
+    #         else:
+    #             log.error("NotFound in emojilist (user=%s): %s", interaction.user.id, exc)
+    #     except discord.HTTPException as exc:
+    #         log.error("HTTP error in emojilist (user=%s): %s", interaction.user.id, exc)

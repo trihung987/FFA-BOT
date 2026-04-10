@@ -11,11 +11,33 @@ from datetime import timedelta
 import discord
 from discord.ext import tasks, commands as ext_commands
 
-from config import CHECKIN_CHANNEL_ID, DIVIDE_LOBBY_CHANNEL_ID, REGISTER_CHANNEL_ID, RESULT_CHANNEL_ID, MIN_PLAYERS_REQUIRED
+from config import (
+    CHECKIN_CHANNEL_ID,
+    DIVIDE_LOBBY_CHANNEL_ID,
+    REGISTER_CHANNEL_ID,
+    RESULT_CHANNEL_ID,
+    MIN_PLAYERS_REQUIRED,
+    LOBBY_CATEGORY_ID,
+)
 from entity import Match, User
 from helpers import now_vn, format_vn_time, parse_duration
 
 log = logging.getLogger(__name__)
+
+# In-memory tracking for divide-lobby announcements. This is intentionally
+# runtime-only so we can delete the whole message set without persisting extra
+# state in the database.
+DIVIDE_MESSAGE_IDS: dict[int, list[int]] = {}
+
+
+def track_divide_message(match_id: int, message_id: int) -> None:
+    ids = DIVIDE_MESSAGE_IDS.setdefault(match_id, [])
+    if message_id not in ids:
+        ids.append(message_id)
+
+
+def get_divide_message_ids(match_id: int) -> list[int]:
+    return list(DIVIDE_MESSAGE_IDS.get(match_id, []))
 
 
 def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
@@ -55,7 +77,7 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 )
                 continue
             checkin_time = time_start - checkin_delta
-            if abs((now - checkin_time).total_seconds()) < 60:
+            if now >= checkin_time:
                 # --- Atomic status guard: only one scheduler tick may claim check-in ---
                 try:
                     with db_session_factory() as session:
@@ -175,7 +197,7 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 # 2. Send check-in embed to the check-in channel
                 checkin_channel = bot.get_channel(CHECKIN_CHANNEL_ID)
                 if checkin_channel:
-                    from views import CheckInView, build_checkin_embed, _load_player_map
+                    from views import CheckInView, build_checkin_embed, _load_player_map, build_registered_mentions
 
                     # Build the initial check-in embed with current player names
                     try:
@@ -197,9 +219,7 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                         continue
 
                     # Tag all registered players so they receive a notification
-                    content = (
-                        " ".join(f"<@{uid}>" for uid in registered) if registered else ""
-                    )
+                    content = build_registered_mentions(registered)
                     view = CheckInView(match_id=match.id, db_session_factory=db_session_factory)
                     try:
                         checkin_msg = await checkin_channel.send(
@@ -240,7 +260,7 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 )
                 continue
             divide_time = time_start - divide_delta
-            if abs((now - divide_time).total_seconds()) < 60:
+            if now >= divide_time:
                 # --- Atomic status guard: only process lobby division when check-in is done ---
                 try:
                     with db_session_factory() as session:
@@ -298,6 +318,8 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 if snap is None:
                     continue
 
+                insufficient_checkins = len(snap.checkin_users_id or []) < MIN_PLAYERS_REQUIRED
+
                 # 1. Edit check-in message: disable button + show "ended" or "cancelled" notice
                 checkin_channel = bot.get_channel(CHECKIN_CHANNEL_ID)
                 if checkin_channel and snap.checkin_message_id:
@@ -328,14 +350,45 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                             snap.id, exc,
                         )
 
+                if insufficient_checkins:
+                    try:
+                        with db_session_factory() as session:
+                            db_match = session.get(Match, snap.id)
+                            if db_match is not None:
+                                db_match.status = "cancelled"
+                                if db_match.end_time is None:
+                                    db_match.end_time = now
+                                session.commit()
+                    except Exception:
+                        log.exception(
+                            "match_scheduler: DB error cancelling match #%s after check-in close",
+                            snap.id,
+                        )
+
+                    channel = bot.get_channel(DIVIDE_LOBBY_CHANNEL_ID)
+                    if channel:
+                        try:
+                            msg = await channel.send(
+                                f"❌ **Trận #{snap.id}** – Hủy chia lobby vì không đủ số người check-in "
+                                f"({len(snap.checkin_users_id or [])}/{MIN_PLAYERS_REQUIRED})."
+                            )
+                            track_divide_message(snap.id, msg.id)
+                        except discord.HTTPException as exc:
+                            log.error(
+                                "match_scheduler: failed to send cancellation notice for match #%s: %s",
+                                snap.id, exc,
+                            )
+                    continue
+
                 # 2. Send announcement to divide-lobby channel
                 channel = bot.get_channel(DIVIDE_LOBBY_CHANNEL_ID)
                 if channel:
                     try:
-                        await channel.send(
-                            f"🔀 **Match #{match.id}** – Đã đến giờ chia lobby! "
+                        msg = await channel.send(
+                            f"🔀 **Trận #{match.id}** – Đã đến giờ chia lobby! "
                             "Đang xử lý…"
                         )
+                        track_divide_message(match.id, msg.id)
                     except discord.HTTPException as exc:
                         log.error(
                             "match_scheduler: failed to send divide announcement for match #%s: %s",
@@ -355,6 +408,19 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                     log.exception(
                         "divide_lobbies error for match #%s", match.id
                     )
+                    try:
+                        with db_session_factory() as session:
+                            session.query(Match).filter(
+                                Match.id == match.id,
+                                Match.status == "dividing",
+                                Match.end_time.is_(None),
+                            ).update({"status": "checkin"}, synchronize_session=False)
+                            session.commit()
+                    except Exception:
+                        log.exception(
+                            "match_scheduler: DB error rolling back divide state for match #%s",
+                            match.id,
+                        )
 
     @match_scheduler.error
     async def match_scheduler_error(error: Exception) -> None:
@@ -362,21 +428,24 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
 
     @tasks.loop(minutes=5)
     async def cleanup_scheduler() -> None:
-        """Mark matches that have passed their start time as ended."""
+        """Backfill end_time for matches that are already logically resolved."""
         now = now_vn()
 
         try:
             with db_session_factory() as session:
                 pending = (
                     session.query(Match)
-                    .filter(Match.end_time.is_(None), Match.time_start < now)
+                    .filter(
+                        Match.end_time.is_(None),
+                        Match.status.in_(["finished", "cancelled"]),
+                    )
                     .all()
                 )
                 for match in pending:
                     match.end_time = now
                 session.commit()
-        except Exception as exc:
-            log.exception("cleanup_scheduler: DB error marking matches as ended")
+        except Exception:
+            log.exception("cleanup_scheduler: DB error backfilling end_time for resolved matches")
 
     @cleanup_scheduler.error
     async def cleanup_scheduler_error(error: Exception) -> None:
@@ -411,6 +480,26 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
     # Initialise the tracking attribute before the loop is ever started
     monthly_reset_scheduler._last_reset_month = (None, None)
 
+    # On startup: check if month changed since last reset (handles bot restarts across months)
+    current_month = (now_vn().year, now_vn().month)
+    if monthly_reset_scheduler._last_reset_month == (None, None):
+        # First run: initialize to current month (will wait for day 1 of next month for first reset)
+        monthly_reset_scheduler._last_reset_month = current_month
+    elif current_month != monthly_reset_scheduler._last_reset_month:
+        # Month changed since last reset or previous startup → reset immediately
+        try:
+            with db_session_factory() as session:
+                session.query(User).update(
+                    {User.monthly_elo_gain: 0}, synchronize_session=False
+                )
+                session.commit()
+            log.info("Startup reset: monthly_elo_gain reset (month changed: %s → %s)", 
+                     monthly_reset_scheduler._last_reset_month, current_month)
+        except Exception:
+            log.exception("Startup reset failed")
+        
+        monthly_reset_scheduler._last_reset_month = current_month
+
     @tasks.loop(minutes=15)
     async def message_cleanup_scheduler() -> None:
         """Delete bot messages for matches that ended or were cancelled 6+ hours ago.
@@ -418,7 +507,9 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
         Deletes:
         - The registration embed (match.register_message_id in REGISTER_CHANNEL_ID)
         - The check-in embed     (match.checkin_message_id  in CHECKIN_CHANNEL_ID)
-        - Each lobby's result-entry embed (lobby.result_message_id in RESULT_CHANNEL_ID)
+        - The lobby display posts (lobby.display_message_ids in DIVIDE_LOBBY_CHANNEL_ID)
+        - Lobby voice/text channels (lobby.voice_channel_ids, lobby.text_channel_ids)
+        - Result-channel messages are intentionally preserved.
 
         Message IDs are set to NULL after deletion to avoid repeated attempts.
         """
@@ -439,11 +530,11 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 )
                 # Snapshot data to avoid detached-instance issues outside the session
                 match_snapshots = [
-                    (m.id, m.register_message_id, m.checkin_message_id)
+                    (m.id, m.register_message_id, m.checkin_message_id, get_divide_message_ids(m.id))
                     for m in matches_to_clean
-                    if m.register_message_id or m.checkin_message_id
+                    if m.register_message_id or m.checkin_message_id or DIVIDE_MESSAGE_IDS.get(m.id)
                 ]
-                # Snapshot lobby data for result-message cleanup
+                # Snapshot lobby data for divide-channel lobby-display cleanup
                 all_match_ids = [m.id for m in matches_to_clean]
                 lobby_snapshots = []
                 if all_match_ids:
@@ -451,11 +542,19 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                         session.query(Lobby)
                         .filter(
                             Lobby.match_id.in_(all_match_ids),
-                            Lobby.result_message_id.isnot(None),
                         )
                         .all()
                     )
-                    lobby_snapshots = [(lb.id, lb.result_message_id) for lb in lobbies]
+                    lobby_snapshots = [
+                        (
+                            lb.id,
+                            list(lb.display_message_ids or []),
+                            list(lb.voice_channel_ids or []),
+                            list(lb.text_channel_ids or []),
+                        )
+                        for lb in lobbies
+                        if lb.display_message_ids or lb.voice_channel_ids or lb.text_channel_ids
+                    ]
         except Exception as exc:
             log.exception("message_cleanup_scheduler: DB error fetching stale messages")
             return
@@ -475,9 +574,12 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 log.warning("Could not delete %s (msg=%s): %s", label, message_id, exc)
 
         # Delete match-level messages
-        for match_id, reg_msg_id, checkin_msg_id in match_snapshots:
+        for match_id, reg_msg_id, checkin_msg_id, divide_msg_ids in match_snapshots:
             await _try_delete(REGISTER_CHANNEL_ID, reg_msg_id, f"register_message match#{match_id}")
             await _try_delete(CHECKIN_CHANNEL_ID, checkin_msg_id, f"checkin_message match#{match_id}")
+            for divide_msg_id in divide_msg_ids:
+                await _try_delete(DIVIDE_LOBBY_CHANNEL_ID, divide_msg_id, f"divide_message match#{match_id}")
+            DIVIDE_MESSAGE_IDS.pop(match_id, None)
             try:
                 with db_session_factory() as session:
                     db_match = session.get(Match, match_id)
@@ -491,18 +593,50 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                     match_id,
                 )
 
-        # Delete lobby result-entry messages
-        for lobby_id, result_msg_id in lobby_snapshots:
-            await _try_delete(RESULT_CHANNEL_ID, result_msg_id, f"result_message lobby#{lobby_id}")
+        # Delete hard lobby display messages from the divide-lobby channel only
+        for lobby_id, display_msg_ids, voice_channel_ids, text_channel_ids in lobby_snapshots:
+            for display_msg_id in display_msg_ids:
+                await _try_delete(DIVIDE_LOBBY_CHANNEL_ID, display_msg_id, f"display_message lobby#{lobby_id}")
+
+            # Delete temporary lobby channels (voice + text) after 6h.
+            # We only delete channels that are inside the configured lobby category.
+            allowed_category_id = int(LOBBY_CATEGORY_ID) if LOBBY_CATEGORY_ID else None
+            channel_ids_to_delete = [
+                cid
+                for cid in [*voice_channel_ids, *text_channel_ids]
+                if cid
+            ]
+            for channel_id in channel_ids_to_delete:
+                ch = bot.get_channel(channel_id)
+                if ch is None:
+                    continue
+                ch_category = getattr(ch, "category", None)
+                ch_category_id = getattr(ch_category, "id", None)
+                if allowed_category_id and ch_category_id != allowed_category_id:
+                    continue
+                try:
+                    await ch.delete(reason="Auto cleanup lobby channels 6h after match end")
+                except discord.NotFound:
+                    pass
+                except Exception as exc:
+                    log.warning(
+                        "Could not delete lobby channel (lobby=%s, channel=%s): %s",
+                        lobby_id,
+                        channel_id,
+                        exc,
+                    )
+
             try:
                 with db_session_factory() as session:
                     db_lobby = session.get(Lobby, lobby_id)
                     if db_lobby:
-                        db_lobby.result_message_id = None
+                        db_lobby.display_message_ids = []
+                        db_lobby.voice_channel_ids = []
+                        db_lobby.text_channel_ids = []
                         session.commit()
             except Exception as exc:
                 log.exception(
-                    "message_cleanup_scheduler: DB error clearing result_message_id for lobby #%s",
+                    "message_cleanup_scheduler: DB error clearing message/channel IDs for lobby #%s",
                     lobby_id,
                 )
 

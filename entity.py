@@ -1,8 +1,17 @@
-from sqlalchemy import Column, Integer, BigInteger, String, JSON, DateTime
+from sqlalchemy import Column, Integer, BigInteger, String, DateTime
+from sqlalchemy.dialects.postgresql import JSON, JSONB
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.sql import func
+from datetime import datetime, timedelta, timezone
 
 Base = declarative_base()
+
+VN_TZ = timezone(timedelta(hours=7))
+
+
+def _now_vn_naive() -> datetime:
+    """Return naive Vietnam local time (UTC+7) for ORM defaults."""
+    return datetime.now(tz=VN_TZ).replace(tzinfo=None)
 
 
 class Match(Base):
@@ -12,11 +21,11 @@ class Match(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     # JSON list of Discord user IDs that registered
-    register_users_id = Column(JSON, nullable=False, default=lambda: [])
+    register_users_id = Column(JSONB, nullable=False, default=lambda: [])
     # JSON list of Discord user IDs that checked in
-    checkin_users_id = Column(JSON, nullable=False, default=lambda: [])
+    checkin_users_id = Column(JSONB, nullable=False, default=lambda: [])
     # JSON list of map names for each fight (length == count_fight)
-    name_maps = Column(JSON, nullable=False, default=lambda: [])
+    name_maps = Column(JSONB, nullable=False, default=lambda: [])
     # Number of fights in this match
     count_fight = Column(Integer, nullable=False)
     # Scheduled start time
@@ -31,7 +40,9 @@ class Match(Base):
     register_message_id = Column(BigInteger, nullable=True)
     # Discord message ID of the check-in embed (set when check-in is triggered)
     checkin_message_id = Column(BigInteger, nullable=True)
-    # Lifecycle status: "open" → "checkin" → "dividing" | "cancelled"
+    # JSON list of Discord message IDs sent to the divide-lobby channel for this match
+    divide_message_ids = Column(JSONB, nullable=False, default=lambda: [])
+    # Lifecycle status: "open" → "checkin" → "dividing" → "finished" | "cancelled"
     # nullable so that rows created before this column was added are treated as "open"
     status = Column(String(20), nullable=True, server_default="open")
 
@@ -49,14 +60,15 @@ class User(Base):
     ticket = Column(Integer, nullable=False, default=0)
     # ELO delta from the most recent change (positive = gained, negative = lost)
     last_elo_change = Column(Integer, nullable=False, default=0)
-    # Cumulative ELO gains (positive only) within the current calendar month
+    # Net cumulative ELO change within the current calendar month (can be negative)
     monthly_elo_gain = Column(Integer, nullable=False, default=0)
-    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    created_date = Column(DateTime, nullable=False, default=_now_vn_naive, server_default=func.now())
     updated_date = Column(
         DateTime,
         nullable=False,
+        default=_now_vn_naive,
         server_default=func.now(),
-        onupdate=func.now(),
+        onupdate=_now_vn_naive,
     )
 
 
@@ -72,18 +84,20 @@ class Lobby(Base):
     # Sequential number within the same tier for this match
     lobby_number = Column(Integer, nullable=False, server_default="1")
     # JSON list of Discord user IDs (ints) assigned to this lobby
-    users_list = Column(JSON, nullable=False, default=lambda: [])
+    users_list = Column(JSONB, nullable=False, default=lambda: [])
     # Number of AI slots added to fill the lobby up to 8
     ai_count = Column(Integer, nullable=False, server_default="0")
     # JSON dict: { str(user_id): [civ_fight1, civ_fight2, ...], "AI_1": [...] }
-    civs = Column(JSON, nullable=False, default=lambda: {})
+    civs = Column(JSONB, nullable=False, default=lambda: {})
     # JSON dict: { "fight_1": { str(user_id): score, ... }, "fight_2": {...} }
-    scores = Column(JSON, nullable=False, default=lambda: {})
+    scores = Column(JSONB, nullable=False, default=lambda: {})
     # "active" | "cancelled" | "finished"
     status = Column(String(20), nullable=False, server_default="active")
     # JSON list of voice channel IDs (one per fight)
-    voice_channel_ids = Column(JSON, nullable=False, default=lambda: [])
+    voice_channel_ids = Column(JSONB, nullable=False, default=lambda: [])
     # JSON list of text channel IDs (one per fight)
-    text_channel_ids = Column(JSON, nullable=False, default=lambda: [])
+    text_channel_ids = Column(JSONB, nullable=False, default=lambda: [])
+    # JSON list of Discord message IDs for the lobby display posts in the divide-lobby channel
+    display_message_ids = Column(JSONB, nullable=False, default=lambda: [])
     # Discord message ID of the result-entry embed in the result channel
     result_message_id = Column(BigInteger, nullable=True)

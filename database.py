@@ -17,6 +17,10 @@ Base.metadata.create_all(engine)
 # Add columns that may be missing from databases created before this migration.
 _MIGRATIONS = [
     "ALTER TABLE matches ADD COLUMN status VARCHAR(20) DEFAULT 'open'",
+    "ALTER TABLE matches ADD COLUMN divide_message_ids JSON DEFAULT '[]'",
+    "ALTER TABLE lobbies ADD COLUMN display_message_ids JSON DEFAULT '[]'",
+    # Create GIN index for JSONB queries on users_list
+    "CREATE INDEX IF NOT EXISTS idx_lobby_users_list ON lobbies USING GIN (users_list jsonb_ops)",
 ]
 
 for _sql in _MIGRATIONS:
