@@ -503,12 +503,14 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         display_file = await build_lobby_display_image_file(lobby_snap, match_snap, p_map)
 
         existing_messages: list[discord.Message] = []
+        missing_message_ids: list[int] = []
         for message_id in old_display_ids:
             try:
                 existing_messages.append(await channel.fetch_message(message_id))
             except discord.NotFound:
-                continue
+                missing_message_ids.append(message_id)
             except discord.HTTPException as exc:
+                missing_message_ids.append(message_id)
                 log.warning(
                     "reroll_lobby_civs: failed fetching old display message (lobby=%s, msg=%s): %s",
                     lobby_id,
@@ -516,17 +518,30 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                     exc,
                 )
 
-        # If DB already tracks display message IDs, enforce updating those messages
-        # and avoid posting new ones unexpectedly.
-        if old_display_ids and not existing_messages:
+        if not old_display_ids:
+            log.error(
+                "reroll_lobby_civs: lobby has no display_message_ids (lobby=%s)",
+                lobby_id,
+            )
             await safe_send_interaction(
                 interaction,
                 "reroll_lobby_civs",
-                (
-                    f"⚠️ Đã random civ cho lobby #{lobby_id} trong DB, "
-                    "nhưng không tìm thấy message lobby cũ theo ID đã lưu để cập nhật. "
-                    "Bot sẽ không gửi message mới để tránh trùng."
-                ),
+                f"❌ Không tìm thấy message chia lobby id: (trống).",
+                ephemeral=True,
+            )
+            return
+
+        if missing_message_ids:
+            missing_str = ", ".join(str(mid) for mid in missing_message_ids)
+            log.error(
+                "reroll_lobby_civs: missing display messages for lobby=%s ids=%s",
+                lobby_id,
+                missing_str,
+            )
+            await safe_send_interaction(
+                interaction,
+                "reroll_lobby_civs",
+                f"❌ Không tìm thấy message chia lobby id: {missing_str}.",
                 ephemeral=True,
             )
             return
@@ -534,17 +549,13 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         try:
             if display_file is not None:
                 display_embed = build_lobby_display_embed(lobby_snap, match_snap)
-                if existing_messages:
-                    edited_msg = existing_messages[0]
-                    await edited_msg.edit(
-                        content=mentions or None,
-                        embed=display_embed,
-                        attachments=[display_file],
-                    )
-                    new_display_ids.append(edited_msg.id)
-                else:
-                    new_msg = await channel.send(content=mentions or None, embed=display_embed, file=display_file)
-                    new_display_ids.append(new_msg.id)
+                edited_msg = existing_messages[0]
+                await edited_msg.edit(
+                    content=mentions or None,
+                    embed=display_embed,
+                    attachments=[display_file],
+                )
+                new_display_ids.append(edited_msg.id)
 
                 for stale_msg in existing_messages[1:]:
                     try:
@@ -559,28 +570,39 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             else:
                 display_messages = build_lobby_display_messages(lobby_snap, match_snap, p_map)
                 if display_messages:
+                    if len(existing_messages) < len(display_messages):
+                        unresolved_ids = old_display_ids[len(existing_messages):len(display_messages)]
+                        unresolved_str = ", ".join(str(mid) for mid in unresolved_ids) or "(không xác định)"
+                        log.error(
+                            "reroll_lobby_civs: not enough stored messages to edit (lobby=%s, needed=%s, have=%s, unresolved=%s)",
+                            lobby_id,
+                            len(display_messages),
+                            len(existing_messages),
+                            unresolved_str,
+                        )
+                        await safe_send_interaction(
+                            interaction,
+                            "reroll_lobby_civs",
+                            f"❌ Không tìm thấy message chia lobby id: {unresolved_str}.",
+                            ephemeral=True,
+                        )
+                        return
+
                     fallback_embed = discord.Embed(
                         title=f"🎮 Chia Lobby - Trận #{match_snap.id}",
                         description=display_messages[0],
                         color=discord.Color.blue(),
                     )
 
-                    if existing_messages:
-                        first_msg = existing_messages[0]
-                        await first_msg.edit(content=mentions or None, embed=fallback_embed, attachments=[])
-                        new_display_ids.append(first_msg.id)
-                    else:
-                        first_msg = await channel.send(content=mentions or None, embed=fallback_embed)
-                        new_display_ids.append(first_msg.id)
+                    first_msg = existing_messages[0]
+                    await first_msg.edit(content=mentions or None, embed=fallback_embed, attachments=[])
+                    new_display_ids.append(first_msg.id)
 
                     for idx, extra_message in enumerate(display_messages[1:], start=1):
                         if idx < len(existing_messages):
                             msg = existing_messages[idx]
                             await msg.edit(content=extra_message, embed=None, attachments=[])
                             new_display_ids.append(msg.id)
-                        else:
-                            extra_msg = await channel.send(content=extra_message)
-                            new_display_ids.append(extra_msg.id)
 
                     for stale_msg in existing_messages[len(display_messages):]:
                         try:
