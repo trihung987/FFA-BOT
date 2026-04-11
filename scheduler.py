@@ -98,37 +98,76 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                     continue
 
                 if claimed == 0:
-                    # Another tick already handled this check-in – skip entirely
+                    # The check-in window may already have been processed in an earlier tick.
+                    # Do not stop here, because this match may still need lobby division later.
                     log.debug(
-                        "match_scheduler: check-in for match #%s already claimed – skipping",
+                        "match_scheduler: check-in for match #%s already claimed – continuing",
                         match.id,
                     )
-                    continue
+                else:
+                    # Reload fresh match data after status update
+                    try:
+                        with db_session_factory() as session:
+                            db_match = session.get(Match, match.id)
+                            if db_match is None:
+                                log.warning(
+                                    "match_scheduler: match #%s disappeared after check-in claim",
+                                    match.id,
+                                )
+                                continue
+                            registered = list(db_match.register_users_id or [])
+                            reg_msg_id = db_match.register_message_id
+                    except Exception:
+                        log.exception(
+                            "match_scheduler: DB error reloading match #%s after check-in claim",
+                            match.id,
+                        )
+                        continue
 
-                # Reload fresh match data after status update
-                try:
-                    with db_session_factory() as session:
-                        db_match = session.get(Match, match.id)
-                        if db_match is None:
-                            log.warning(
-                                "match_scheduler: match #%s disappeared after check-in claim",
+                    register_channel = bot.get_channel(REGISTER_CHANNEL_ID)
+
+                    # --- Not enough players: cancel the match ---
+                    if len(registered) < MIN_PLAYERS_REQUIRED:
+                        # Edit the registration embed to show the cancellation notice with disabled buttons
+                        if register_channel and reg_msg_id:
+                            try:
+                                from views import build_registration_embed, _load_player_map, build_disabled_registration_view
+
+                                reg_msg = await register_channel.fetch_message(reg_msg_id)
+                                with db_session_factory() as session:
+                                    db_match = session.get(Match, match.id)
+                                    p_map = _load_player_map(session, registered)
+                                    cancelled_embed = build_registration_embed(db_match, p_map, cancelled=True)
+                                await reg_msg.edit(embed=cancelled_embed, view=build_disabled_registration_view())
+                            except discord.NotFound:
+                                log.debug(
+                                    "match_scheduler: register message %s for match #%s not found",
+                                    reg_msg_id, match.id,
+                                )
+                            except discord.HTTPException as exc:
+                                log.error(
+                                    "match_scheduler: failed to notify cancellation for match #%s: %s",
+                                    match.id, exc,
+                                )
+
+                        # Mark match as cancelled
+                        try:
+                            with db_session_factory() as session:
+                                db_match = session.get(Match, match.id)
+                                if db_match is not None:
+                                    db_match.status = "cancelled"
+                                    db_match.end_time = now
+                                    session.commit()
+                        except Exception:
+                            log.exception(
+                                "match_scheduler: DB error cancelling match #%s",
                                 match.id,
                             )
-                            continue
-                        registered = list(db_match.register_users_id or [])
-                        reg_msg_id = db_match.register_message_id
-                except Exception:
-                    log.exception(
-                        "match_scheduler: DB error reloading match #%s after check-in claim",
-                        match.id,
-                    )
-                    continue
+                        continue
 
-                register_channel = bot.get_channel(REGISTER_CHANNEL_ID)
+                    # --- Enough players: start check-in ---
 
-                # --- Not enough players: cancel the match ---
-                if len(registered) < MIN_PLAYERS_REQUIRED:
-                    # Edit the registration embed to show the cancellation notice with disabled buttons
+                    # 1. Edit registration message: disable buttons + add "check-in started" notice
                     if register_channel and reg_msg_id:
                         try:
                             from views import build_registration_embed, _load_player_map, build_disabled_registration_view
@@ -137,8 +176,8 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                             with db_session_factory() as session:
                                 db_match = session.get(Match, match.id)
                                 p_map = _load_player_map(session, registered)
-                                cancelled_embed = build_registration_embed(db_match, p_map, cancelled=True)
-                            await reg_msg.edit(embed=cancelled_embed, view=build_disabled_registration_view())
+                                reg_embed = build_registration_embed(db_match, p_map, checkin_started=True)
+                            await reg_msg.edit(embed=reg_embed, view=build_disabled_registration_view())
                         except discord.NotFound:
                             log.debug(
                                 "match_scheduler: register message %s for match #%s not found",
@@ -146,109 +185,70 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                             )
                         except discord.HTTPException as exc:
                             log.error(
-                                "match_scheduler: failed to notify cancellation for match #%s: %s",
+                                "match_scheduler: failed to edit register message for match #%s: %s",
                                 match.id, exc,
                             )
-
-                    # Mark match as cancelled
-                    try:
-                        with db_session_factory() as session:
-                            db_match = session.get(Match, match.id)
-                            if db_match is not None:
-                                db_match.status = "cancelled"
-                                db_match.end_time = now
-                                session.commit()
-                    except Exception:
-                        log.exception(
-                            "match_scheduler: DB error cancelling match #%s",
-                            match.id,
+                    elif not register_channel:
+                        log.warning(
+                            "match_scheduler: register channel %s not found (match #%s)",
+                            REGISTER_CHANNEL_ID, match.id,
                         )
-                    continue
 
-                # --- Enough players: start check-in ---
+                    # 2. Send check-in embed to the check-in channel
+                    checkin_channel = bot.get_channel(CHECKIN_CHANNEL_ID)
+                    if checkin_channel:
+                        from views import CheckInView, build_checkin_embed, _load_player_map, build_registered_mentions
 
-                # 1. Edit registration message: disable buttons + add "check-in started" notice
-                if register_channel and reg_msg_id:
-                    try:
-                        from views import build_registration_embed, _load_player_map, build_disabled_registration_view
+                        # Build the initial check-in embed with current player names
+                        try:
+                            with db_session_factory() as session:
+                                db_match = session.get(Match, match.id)
+                                if db_match is None:
+                                    log.warning(
+                                        "match_scheduler: match #%s disappeared before check-in message",
+                                        match.id,
+                                    )
+                                    continue
+                                p_map = _load_player_map(session, registered)
+                                embed = build_checkin_embed(db_match, p_map)
+                        except Exception:
+                            log.exception(
+                                "match_scheduler: DB error building check-in embed for match #%s",
+                                match.id,
+                            )
+                            continue
 
-                        reg_msg = await register_channel.fetch_message(reg_msg_id)
-                        with db_session_factory() as session:
-                            db_match = session.get(Match, match.id)
-                            p_map = _load_player_map(session, registered)
-                            reg_embed = build_registration_embed(db_match, p_map, checkin_started=True)
-                        await reg_msg.edit(embed=reg_embed, view=build_disabled_registration_view())
-                    except discord.NotFound:
-                        log.debug(
-                            "match_scheduler: register message %s for match #%s not found",
-                            reg_msg_id, match.id,
+                        # Tag all registered players so they receive a notification
+                        content = build_registered_mentions(registered)
+                        view = CheckInView(match_id=match.id, db_session_factory=db_session_factory)
+                        try:
+                            checkin_msg = await checkin_channel.send(
+                                content=content, embed=embed, view=view
+                            )
+                        except discord.HTTPException:
+                            log.exception(
+                                "match_scheduler: failed to send check-in message for match #%s",
+                                match.id,
+                            )
+                            continue
+
+                        # 3. Persist the check-in message ID
+                        try:
+                            with db_session_factory() as session:
+                                db_match = session.get(Match, match.id)
+                                if db_match is not None:
+                                    db_match.checkin_message_id = checkin_msg.id
+                                    session.commit()
+                        except Exception:
+                            log.exception(
+                                "match_scheduler: DB error saving checkin_message_id for match #%s",
+                                match.id,
+                            )
+                    else:
+                        log.warning(
+                            "match_scheduler: check-in channel %s not found (match #%s)",
+                            CHECKIN_CHANNEL_ID, match.id,
                         )
-                    except discord.HTTPException as exc:
-                        log.error(
-                            "match_scheduler: failed to edit register message for match #%s: %s",
-                            match.id, exc,
-                        )
-                elif not register_channel:
-                    log.warning(
-                        "match_scheduler: register channel %s not found (match #%s)",
-                        REGISTER_CHANNEL_ID, match.id,
-                    )
-
-                # 2. Send check-in embed to the check-in channel
-                checkin_channel = bot.get_channel(CHECKIN_CHANNEL_ID)
-                if checkin_channel:
-                    from views import CheckInView, build_checkin_embed, _load_player_map, build_registered_mentions
-
-                    # Build the initial check-in embed with current player names
-                    try:
-                        with db_session_factory() as session:
-                            db_match = session.get(Match, match.id)
-                            if db_match is None:
-                                log.warning(
-                                    "match_scheduler: match #%s disappeared before check-in message",
-                                    match.id,
-                                )
-                                continue
-                            p_map = _load_player_map(session, registered)
-                            embed = build_checkin_embed(db_match, p_map)
-                    except Exception:
-                        log.exception(
-                            "match_scheduler: DB error building check-in embed for match #%s",
-                            match.id,
-                        )
-                        continue
-
-                    # Tag all registered players so they receive a notification
-                    content = build_registered_mentions(registered)
-                    view = CheckInView(match_id=match.id, db_session_factory=db_session_factory)
-                    try:
-                        checkin_msg = await checkin_channel.send(
-                            content=content, embed=embed, view=view
-                        )
-                    except discord.HTTPException:
-                        log.exception(
-                            "match_scheduler: failed to send check-in message for match #%s",
-                            match.id,
-                        )
-                        continue
-
-                    # 3. Persist the check-in message ID
-                    try:
-                        with db_session_factory() as session:
-                            db_match = session.get(Match, match.id)
-                            if db_match is not None:
-                                db_match.checkin_message_id = checkin_msg.id
-                                session.commit()
-                    except Exception:
-                        log.exception(
-                            "match_scheduler: DB error saving checkin_message_id for match #%s",
-                            match.id,
-                        )
-                else:
-                    log.warning(
-                        "match_scheduler: check-in channel %s not found (match #%s)",
-                        CHECKIN_CHANNEL_ID, match.id,
-                    )
 
             # --- Lobby-division time ---
             try:

@@ -7,7 +7,7 @@ from discord.ext import commands as ext_commands
 from typing import Optional
 
 from config import GUILD_ID
-from entity import User, Lobby
+from entity import User
 from helpers import get_rank, now_vn, safe_send_interaction
 from sqlalchemy import text as sa_text
 
@@ -43,6 +43,7 @@ RANK_ANSI = {
 # Header/title: standard green text
 BORDER_ANSI = "32"
 HEADER_ANSI = "1;32"  
+PAGE_SIZE = 6
 
 # ── Column widths (number of visible characters, not bytes) ───────────────────
 W_POS     = 2   # #
@@ -234,6 +235,168 @@ def _build_table(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _build_page_content(rows: list[dict], page_index: int, total_pages: int) -> str:
+    table = _build_table(rows)
+    return f"[Trang {page_index + 1}/{total_pages}]\n```ansi\n{table}\n```"
+
+
+def _fetch_leaderboard_page(
+    db_session_factory,
+    guild: Optional[discord.Guild],
+    page_index: int,
+    page_size: int,
+) -> tuple[list[dict], int, int]:
+    with db_session_factory() as session:
+        total_users = session.query(User).count()
+        if total_users == 0:
+            return [], 0, 0
+
+        total_pages = (total_users + page_size - 1) // page_size
+        normalized_page = max(0, min(page_index, total_pages - 1))
+        offset = normalized_page * page_size
+
+        users: list[User] = (
+            session.query(User)
+            .order_by(User.elo.desc())
+            .offset(offset)
+            .limit(page_size)
+            .all()
+        )
+
+        user_ids = [u.id for u in users]
+        match_count_map: dict[int, int] = {}
+        if user_ids:
+            match_counts_raw = session.execute(
+                sa_text("""
+                    SELECT elem::bigint AS user_id, COUNT(*) AS cnt
+                    FROM   lobbies,
+                           jsonb_array_elements_text(users_list) AS elem
+                    WHERE  status = 'finished'
+                      AND  elem::bigint = ANY(:ids)
+                    GROUP  BY elem::bigint
+                """),
+                {"ids": user_ids},
+            ).fetchall()
+            match_count_map = {row.user_id: row.cnt for row in match_counts_raw}
+
+    now = now_vn()
+    current_month = (now.year, now.month)
+    rows: list[dict] = []
+    for idx, user in enumerate(users, start=1):
+        member = guild.get_member(user.id) if guild else None
+        name = member.display_name if member else f"User{user.id}"
+        update_month = (
+            (user.updated_date.year, user.updated_date.month)
+            if user.updated_date is not None
+            else None
+        )
+        monthly_value = user.monthly_elo_gain if update_month == current_month else 0
+        rows.append({
+            "pos": offset + idx,
+            "name": name,
+            "elo": user.elo,
+            "last_elo_change": user.last_elo_change,
+            "monthly_elo_gain": monthly_value,
+            "total_matches": match_count_map.get(user.id, 0),
+        })
+
+    return rows, total_pages, normalized_page
+
+
+class LeaderboardPaginationView(discord.ui.View):
+    def __init__(
+        self,
+        owner_id: int,
+        db_session_factory,
+        guild: Optional[discord.Guild],
+        total_pages: int,
+        page_size: int = PAGE_SIZE,
+        timeout: float = 180.0,
+    ):
+        super().__init__(timeout=timeout)
+        self.owner_id = owner_id
+        self.db_session_factory = db_session_factory
+        self.guild = guild
+        self.page_size = page_size
+        self.total_pages = max(total_pages, 1)
+        self.page = 0
+        self.message: Optional[discord.Message] = None
+        self._sync_controls()
+
+    def _sync_controls(self) -> None:
+        total = self.total_pages
+        self.prev_button.disabled = total <= 1 or self.page <= 0
+        self.next_button.disabled = total <= 1 or self.page >= total - 1
+        self.page_indicator.label = f"{self.page + 1}/{max(total, 1)}"
+
+    async def _render_page(self, interaction: discord.Interaction, target_page: int) -> None:
+        rows, total_pages, normalized_page = _fetch_leaderboard_page(
+            self.db_session_factory,
+            self.guild,
+            target_page,
+            self.page_size,
+        )
+        if total_pages == 0:
+            self.total_pages = 1
+            self.page = 0
+            self._sync_controls()
+            await interaction.response.edit_message(
+                content="Chưa có người dùng nào trong hệ thống.",
+                view=self,
+            )
+            return
+
+        self.total_pages = total_pages
+        self.page = normalized_page
+        self._sync_controls()
+        content = _build_page_content(rows, self.page, self.total_pages)
+        await interaction.response.edit_message(content=content, view=self)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Bạn không thể điều khiển bảng xếp hạng này.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        self.prev_button.disabled = True
+        self.next_button.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.button(label="◀ Trước", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        try:
+            await self._render_page(interaction, self.page - 1)
+        except Exception:
+            log.exception("Failed to load previous leaderboard page (user=%s)", interaction.user.id)
+            await interaction.response.send_message(
+                "❌ Không thể tải trang trước của bảng xếp hạng.",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="1/1", style=discord.ButtonStyle.secondary, disabled=True)
+    async def page_indicator(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Sau ▶", style=discord.ButtonStyle.primary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        try:
+            await self._render_page(interaction, self.page + 1)
+        except Exception:
+            log.exception("Failed to load next leaderboard page (user=%s)", interaction.user.id)
+            await interaction.response.send_message(
+                "❌ Không thể tải trang sau của bảng xếp hạng.",
+                ephemeral=True,
+            )
+
+
 # ── Command registration ───────────────────────────────────────────────────────
 
 def register_leaderboard_commands(bot: ext_commands.Bot, db_session_factory) -> None:
@@ -246,35 +409,17 @@ def register_leaderboard_commands(bot: ext_commands.Bot, db_session_factory) -> 
     )
     async def leaderboard(interaction: discord.Interaction) -> None:
 
-        # ── 1. Fetch data ──────────────────────────────────────────────────────
+        # Defer early to prevent interaction expiry while fetching and formatting data.
+        await interaction.response.defer()
+
+        # ── 1. Fetch first page only (DB-level pagination) ────────────────────
         try:
-            with db_session_factory() as session:
-                top_users: list[User] = (
-                    session.query(User)
-                    .order_by(User.elo.desc())
-                    .limit(10)
-                    .all()
-                )
-
-                user_ids = [u.id for u in top_users]
-
-                # Count finished lobbies each user participated in.
-                # users_list is a JSONB array of Discord user IDs (integers).
-                match_counts_raw = session.execute(
-                    sa_text("""
-                        SELECT elem::bigint AS user_id, COUNT(*) AS cnt
-                        FROM   lobbies,
-                               jsonb_array_elements_text(users_list) AS elem
-                        WHERE  status = 'finished'
-                          AND  elem::bigint = ANY(:ids)
-                        GROUP  BY elem::bigint
-                    """),
-                    {"ids": user_ids},
-                ).fetchall()
-
-                match_count_map: dict[int, int] = {
-                    row.user_id: row.cnt for row in match_counts_raw
-                }
+            rows, total_pages, normalized_page = _fetch_leaderboard_page(
+                db_session_factory,
+                interaction.guild,
+                page_index=0,
+                page_size=PAGE_SIZE,
+            )
 
         except Exception:
             log.exception("DB error in leaderboard (user=%s)", interaction.user.id)
@@ -286,7 +431,7 @@ def register_leaderboard_commands(bot: ext_commands.Bot, db_session_factory) -> 
             )
             return
 
-        if not top_users:
+        if total_pages == 0:
             await safe_send_interaction(
                 interaction,
                 "leaderboard",
@@ -295,35 +440,20 @@ def register_leaderboard_commands(bot: ext_commands.Bot, db_session_factory) -> 
             )
             return
 
-        # ── 2. Resolve display names ───────────────────────────────────────────
-        rows = []
-        now = now_vn()
-        current_month = (now.year, now.month)
-        for rank, user in enumerate(top_users, start=1):
-            member = interaction.guild.get_member(user.id)
-            name   = member.display_name if member else f"User{user.id}"
-            update_month = (
-                (user.updated_date.year, user.updated_date.month)
-                if user.updated_date is not None
-                else None
-            )
-            monthly_value = user.monthly_elo_gain if update_month == current_month else 0
-            rows.append({
-                "pos":              rank,
-                "name":             name,
-                "elo":              user.elo,
-                "last_elo_change":  user.last_elo_change,
-                "monthly_elo_gain": monthly_value,
-                "total_matches":    match_count_map.get(user.id, 0),
-            })
+        # ── 2. Send first page and attach DB-backed pagination view ───────────
+        content = _build_page_content(rows, normalized_page, total_pages)
+        view = LeaderboardPaginationView(
+            owner_id=interaction.user.id,
+            db_session_factory=db_session_factory,
+            guild=interaction.guild,
+            total_pages=total_pages,
+            page_size=PAGE_SIZE,
+        )
+        view.page = normalized_page
+        view._sync_controls()
 
-        # ── 3. Send as plain code block (no embed) ─────────────────────────────
-        # Plain ``` blocks preserve monospace alignment in Discord on all
-        # platforms.  Embed descriptions do NOT guarantee monospace rendering.
-        table   = _build_table(rows)
-        content = f"```ansi\n{table}\n```"
-
-        await safe_send_interaction(interaction, "leaderboard", content)
+        msg = await interaction.followup.send(content=content, view=view, wait=True)
+        view.message = msg
 
     # @bot.tree.command(
     #     name="ansi_256_test",
