@@ -43,7 +43,7 @@ RANK_ANSI = {
 # Header/title: standard green text
 BORDER_ANSI = "32"
 HEADER_ANSI = "1;32"  
-PAGE_SIZE = 5
+PAGE_SIZE = 8
 
 # ── Column widths (number of visible characters, not bytes) ───────────────────
 W_POS     = 4   # # (supports #10, #100 without truncation)
@@ -163,7 +163,7 @@ def _row_with_colored_tier(
         delta,
         monthly,
         aligns=["left", "left", "right", "center", "right", "right", "right"],
-        cell_color=tier_ansi_code,
+        cell_color=None,
         color_border=False,
     )
     return _ansi(row, tier_ansi_code)
