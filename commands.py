@@ -1214,7 +1214,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             try:
                 display_messages: list[str] = []
                 display_file = None
-                mentions = ""
+                mentions = "" 
                 display_message_ids: list[int] = []
                 with db_session_factory() as session:
                     db_lobby = session.get(Lobby, lobby_id)
