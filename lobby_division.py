@@ -635,7 +635,7 @@ async def create_lobby_channels(
             await tc.send(
                 "@here\n"
                 f"**Kênh chat này dùng để khai báo điểm số Trận {i} - Map {map_name}.**\n"
-                "**Mỗi người tựkKhai báo điểm (Vua/Firstblood) ăn được tại đây để admin/trọng tài kiểm tra và nhập kết quả.**"
+                "**Mỗi người tự Khai báo điểm (Vua/Firstblood) ăn được tại đây để admin/trọng tài kiểm tra và nhập kết quả.**"
             )
         except discord.HTTPException:
             log.warning(

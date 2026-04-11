@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 from io import BytesIO
+from pathlib import Path
 
 import discord
 
@@ -15,6 +18,15 @@ from .common import (
     _set_view_items_disabled,
     log,
 )
+
+
+FONT_BASE_DIR = Path(__file__).resolve().parent.parent / "Be_Vietnam_Pro,Noto_Sans,Poppins"
+BE_VIETNAM_PRO_DIR = FONT_BASE_DIR / "Be_Vietnam_Pro"
+NOTO_SANS_DIR = FONT_BASE_DIR / "Noto_Sans" / "static"
+
+_FONT_CACHE: dict[tuple[int, bool], object] = {}
+_LOBBY_IMAGE_CACHE: dict[int, tuple[str, bytes]] = {}
+_MAX_IMAGE_CACHE_ITEMS = 256
 
 
 def build_lobby_result_embed(lobby, match, p_map: dict[int, str] | None = None) -> discord.Embed:
@@ -75,12 +87,69 @@ def _safe_int_score(raw) -> int:
         return 0
 
 
+def _load_font(size: int, *, bold: bool = False):
+    from PIL import ImageFont
+
+    key = (size, bold)
+    cached = _FONT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    candidates = [
+        BE_VIETNAM_PRO_DIR / ("BeVietnamPro-Bold.ttf" if bold else "BeVietnamPro-Regular.ttf"),
+        NOTO_SANS_DIR / ("NotoSans-Bold.ttf" if bold else "NotoSans-Regular.ttf"),
+    ]
+    for path in candidates:
+        if path.exists():
+            try:
+                loaded = ImageFont.truetype(str(path), size)
+                _FONT_CACHE[key] = loaded
+                return loaded
+            except Exception:
+                continue
+    loaded = ImageFont.load_default()
+    _FONT_CACHE[key] = loaded
+    return loaded
+
+
+def _warm_lobby_result_font_cache() -> None:
+    # Preload sizes used by lobby result rendering so first render is faster.
+    try:
+        _load_font(44, bold=True)
+        _load_font(24, bold=True)
+        _load_font(22, bold=False)
+    except Exception:
+        # Keep module import safe even when Pillow/fonts are not available.
+        log.warning("Unable to preload lobby result fonts.")
+
+
+def _build_lobby_score_fingerprint(lobby, match, p_map: dict[int, str] | None = None) -> str:
+    payload = {
+        "lobby_id": getattr(lobby, "id", None),
+        "lobby_number": getattr(lobby, "lobby_number", None),
+        "tier": getattr(lobby, "tier", None),
+        "users_list": list(getattr(lobby, "users_list", []) or []),
+        "scores": getattr(lobby, "scores", {}) or {},
+        "count_fight": int(getattr(match, "count_fight", 0) or 0),
+        "players": p_map or {},
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def build_lobby_result_image_file(lobby, match, p_map: dict[int, str] | None = None) -> discord.File | None:
     try:
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageDraw
     except Exception:
         log.exception("Pillow is unavailable while building lobby score image (lobby=%s)", getattr(lobby, "id", None))
         return None
+
+    lobby_id = getattr(lobby, "id", None)
+    fingerprint = _build_lobby_score_fingerprint(lobby, match, p_map)
+    if isinstance(lobby_id, int):
+        cached = _LOBBY_IMAGE_CACHE.get(lobby_id)
+        if cached is not None and cached[0] == fingerprint:
+            return discord.File(BytesIO(cached[1]), filename=_build_lobby_score_image_filename(lobby))
 
     bg_path = os.path.join(
         os.path.dirname(os.path.dirname(__file__)),
@@ -102,14 +171,9 @@ def build_lobby_result_image_file(lobby, match, p_map: dict[int, str] | None = N
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    try:
-        font_title = ImageFont.truetype("arialbd.ttf", 44)
-        font_header = ImageFont.truetype("arialbd.ttf", 24)
-        font_cell = ImageFont.truetype("arial.ttf", 22)
-    except Exception:
-        font_title = ImageFont.load_default()
-        font_header = ImageFont.load_default()
-        font_cell = ImageFont.load_default()
+    font_title = _load_font(44, bold=True)
+    font_header = _load_font(24, bold=True)
+    font_cell = _load_font(22)
 
     tier = lobby.tier or "?"
     lobby_number = lobby.lobby_number or 0
@@ -151,7 +215,7 @@ def build_lobby_result_image_file(lobby, match, p_map: dict[int, str] | None = N
         rows.append([str(rank), player_name, *[str(v) for v in row_scores], str(total_score)])
 
     if not rows:
-        rows.append(["1", "(chua co nguoi choi)", *(["0"] * count_fight), "0"])
+        rows.append(["1", "(Chưa có người chơi)", *(["0"] * count_fight), "0"])
 
     table_left = panel_margin_x + 24
     table_right = width - panel_margin_x - 24
@@ -199,6 +263,13 @@ def build_lobby_result_image_file(lobby, match, p_map: dict[int, str] | None = N
     final_img = Image.alpha_composite(base, overlay).convert("RGB")
     buffer = BytesIO()
     final_img.save(buffer, format="PNG", optimize=True)
+    image_bytes = buffer.getvalue()
+
+    if isinstance(lobby_id, int):
+        _LOBBY_IMAGE_CACHE[lobby_id] = (fingerprint, image_bytes)
+        if len(_LOBBY_IMAGE_CACHE) > _MAX_IMAGE_CACHE_ITEMS:
+            _LOBBY_IMAGE_CACHE.pop(next(iter(_LOBBY_IMAGE_CACHE)))
+
     buffer.seek(0)
     return discord.File(buffer, filename=_build_lobby_score_image_filename(lobby))
 
@@ -209,6 +280,9 @@ def build_lobby_result_message_assets(lobby, match, p_map: dict[int, str] | None
     if image_file is None:
         embed.set_image(url=None)
     return embed, image_file
+
+
+_warm_lobby_result_font_cache()
 
 
 _MODAL_PAGE_SIZE = 4
@@ -572,6 +646,8 @@ class LobbyResultView(discord.ui.View):
 
             users = session.query(User).filter(User.id.in_(list(delta_by_user.keys()))).all()
             user_map = {u.id: u for u in users}
+            updated_at = now_vn()
+            updates: list[dict] = []
 
             for uid, delta in delta_by_user.items():
                 user = user_map.get(uid)
@@ -583,12 +659,23 @@ class LobbyResultView(discord.ui.View):
                     )
                     continue
                 log.info("Applying ELO delta for user %s in lobby %s: %+d (old ELO: %s)", uid, lobby_id, delta, user.elo)
-                new_elo = max(0, (user.elo or 0) + delta)
-                actual_delta = new_elo - (user.elo or 0)
-                user.elo = new_elo
-                user.last_elo_change = actual_delta
-                user.updated_date = now_vn()
-                user.monthly_elo_gain = (user.monthly_elo_gain or 0) + actual_delta
+                old_elo = user.elo or 0
+                new_elo = max(0, old_elo + delta)
+                actual_delta = new_elo - old_elo
+                updates.append(
+                    {
+                        "id": uid,
+                        "elo": new_elo,
+                        "last_elo_change": actual_delta,
+                        "updated_date": updated_at,
+                        "monthly_elo_gain": (user.monthly_elo_gain or 0) + actual_delta,
+                    }
+                )
+
+            if not updates:
+                return
+
+            session.bulk_update_mappings(User, updates)
 
             session.commit()
 
@@ -889,19 +976,12 @@ class LobbyResultView(discord.ui.View):
                     return
 
                 lobby.status = "cancelled"
-                session.commit()
                 match = session.get(Match, lobby.match_id)
 
                 self._rollup_match_status_after_lobby_resolution(session, match, now_vn())
                 session.commit()
 
-                _uids = lobby.users_list or []
-                _p_map = _load_player_map(session, _uids)
-                new_embed, new_file = (
-                    build_lobby_result_message_assets(lobby, match, _p_map)
-                    if match
-                    else (None, None)
-                )
+                new_embed = build_lobby_result_embed(lobby, match) if match else None
         except Exception:
             log.exception("DB error in _cancel_lobby (lobby=%s, user=%s)", self.lobby_id, interaction.user.id)
             await _safe_edit_original_response(
@@ -912,9 +992,12 @@ class LobbyResultView(discord.ui.View):
             return
 
         if new_embed:
+            if interaction.message is not None and interaction.message.attachments:
+                new_embed.set_image(url=interaction.message.attachments[0].url)
+            else:
+                new_embed.set_image(url=None)
+
             kwargs = {"embed": new_embed, "view": discord.ui.View()}
-            if new_file is not None:
-                kwargs["attachments"] = [new_file]
             if interaction.message is not None:
                 await _safe_message_edit(
                     interaction.message,
@@ -1025,8 +1108,6 @@ class LobbyResultView(discord.ui.View):
                     return
 
                 lobby.status = "finished"
-                session.commit()
-
                 self._rollup_match_status_after_lobby_resolution(session, match, now_vn())
                 session.commit()
 
