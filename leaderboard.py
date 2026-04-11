@@ -47,12 +47,12 @@ PAGE_SIZE = 5
 
 # ── Column widths (number of visible characters, not bytes) ───────────────────
 W_POS     = 4   # # (supports #10, #100 without truncation)
-W_NAME    = 12  # Người chơi
+W_NAME    = 15  # Người chơi
 W_ELO     = 4   # ELO
 W_TIER    = 10  # Tier (icon + name)
 W_MATCHES = 5   # Tổng trận
-W_DELTA   = 6   # Biến động
-W_MONTHLY = 6   # ELO tháng
+W_DELTA   = 7   # ELO +/-
+W_MONTHLY = 10  # ELO tháng +/-
 
 # ── Low-level helpers ──────────────────────────────────────────────────────────
 
@@ -126,7 +126,7 @@ def _row(
     pos, name, elo, tier, matches, delta, monthly.
     """
     widths = _SEGS
-    row_aligns = aligns or ["right", "left", "right", "left", "right", "right", "right"]
+    row_aligns = aligns or ["left", "left", "right", "center", "right", "right", "right"]
     parts = []
     for value, width, align in zip(cells, widths, row_aligns):
         text = _cell(value, width, align)
@@ -150,22 +150,23 @@ def _row_with_colored_tier(
     last_elo_change: int,
     monthly_elo_gain: int,
 ) -> str:
-    """Build one row with tier colors and value-based colors for trend columns."""
-    delta_color = _trend_color(last_elo_change)
-    monthly_color = _trend_color(monthly_elo_gain)
+    """Build one row and color the whole row by player's rank tier."""
     delta = _fmt_delta(last_elo_change)
     monthly = _fmt_delta(monthly_elo_gain)
 
-    parts = [
-        f" {_cell(pos, W_POS, 'right')} ",
-        f" {_cell(name, W_NAME, 'left')} ",
-        f" {_cell(elo, W_ELO, 'right')} ",
-        f" {_ansi(_cell(tier_plain, W_TIER, 'left'), tier_ansi_code)} ",
-        f" {_cell(matches, W_MATCHES, 'right')} ",
-        f" {_ansi(_cell(delta, W_DELTA, 'right'), delta_color)} ",
-        f" {_ansi(_cell(monthly, W_MONTHLY, 'right'), monthly_color)} ",
-    ]
-    return "║" + "║".join(parts) + "║"
+    row = _row(
+        pos,
+        name,
+        elo,
+        tier_plain,
+        matches,
+        delta,
+        monthly,
+        aligns=["left", "left", "right", "center", "right", "right", "right"],
+        cell_color=tier_ansi_code,
+        color_border=False,
+    )
+    return _ansi(row, tier_ansi_code)
 
 
 # ── Table builder ──────────────────────────────────────────────────────────────
@@ -184,7 +185,13 @@ def _build_table(rows: list[dict]) -> str:
     """
     header_aligns = ["center", "center", "center", "center", "center", "center", "center"]
     header_row_1 = _row(
-        "#", "Người chơi", "ELO", "Tier", "Trận", "Biến", "Tháng",
+        "#", "Người chơi", "ELO", "Tier", "Số", "ELO", "ELO tháng",
+        aligns=header_aligns,
+        cell_color=HEADER_ANSI,
+        color_border=True,
+    )
+    header_row_2 = _row(
+        "", "", "", "", "trận", "+/-", "+/-",
         aligns=header_aligns,
         cell_color=HEADER_ANSI,
         color_border=True,
@@ -193,6 +200,7 @@ def _build_table(rows: list[dict]) -> str:
     lines = [
         _hline("╔", "╦", "╗"),
         header_row_1,
+        header_row_2,
         _hline("╠", "╬", "╣"),
     ]
 
