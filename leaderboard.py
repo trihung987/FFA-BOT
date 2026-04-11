@@ -52,7 +52,7 @@ W_ELO     = 4   # ELO
 W_TIER    = 10  # Tier (icon + name)
 W_MATCHES = 5   # Tổng trận
 W_DELTA   = 7   # ELO +/-
-W_MONTHLY = 10  # ELO tháng +/-
+W_MONTHLY = 8   # ELO tháng
 
 # ── Low-level helpers ──────────────────────────────────────────────────────────
 
@@ -185,13 +185,13 @@ def _build_table(rows: list[dict]) -> str:
     """
     header_aligns = ["center", "center", "center", "center", "center", "center", "center"]
     header_row_1 = _row(
-        "#", "Người chơi", "ELO", "Tier", "Số", "ELO", "ELO tháng",
+        "#", "Người chơi", "ELO", "Tier", "Số", "ELO", "ELO",
         aligns=header_aligns,
         cell_color=HEADER_ANSI,
         color_border=True,
     )
     header_row_2 = _row(
-        "", "", "", "", "trận", "+/-", "+/-",
+        "", "", "", "", "trận", "+/-", "tháng",
         aligns=header_aligns,
         cell_color=HEADER_ANSI,
         color_border=True,
