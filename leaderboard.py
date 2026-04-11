@@ -42,8 +42,9 @@ RANK_ANSI = {
 # Border: yellow text
 # Header/title: standard green text
 BORDER_ANSI = "32"
-HEADER_ANSI = "1;32"  
-PAGE_SIZE = 5
+HEADER_ANSI = "1;32"
+# Keep per-page output small enough for Discord's 2000-char message limit.
+PAGE_SIZE = 4
 
 # ── Column widths (number of visible characters, not bytes) ───────────────────
 W_POS     = 2   # #
@@ -170,7 +171,7 @@ def _row_with_colored_tier(
 
 # ── Table builder ──────────────────────────────────────────────────────────────
 
-def _build_table(rows: list[dict]) -> str:
+def _build_table(rows: list[dict], *, include_legend: bool = True) -> str:
     """
     Assemble the full ASCII table.
 
@@ -231,13 +232,32 @@ def _build_table(rows: list[dict]) -> str:
         )
 
     lines.append(_hline("╚", "╩", "╝"))
-    lines.append(_ansi("★ Challenger", "31") + "  " + _ansi("◆ Legendary", "35") + "  " + _ansi("♦ Diamond", "34") + "  " + _ansi("● Platinum", "36") + "  " + _ansi("▲ Gold", "33") + "  " + _ansi("▶ Silver", "37") + "  " + _ansi("▼ Bronze", "37"))
+    if include_legend:
+        lines.append(_ansi("★ Challenger", "31") + "  " + _ansi("◆ Legendary", "35") + "  " + _ansi("♦ Diamond", "34") + "  " + _ansi("● Platinum", "36") + "  " + _ansi("▲ Gold", "33") + "  " + _ansi("▶ Silver", "37") + "  " + _ansi("▼ Bronze", "37"))
     return "\n".join(lines)
 
 
 def _build_page_content(rows: list[dict], page_index: int, total_pages: int) -> str:
-    table = _build_table(rows)
-    return f"[Trang {page_index + 1}/{total_pages}]\n```ansi\n{table}\n```"
+    # Discord hard-limits message content to 2000 characters.
+    # Try full table first, then progressively smaller renderings.
+    table = _build_table(rows, include_legend=True)
+    content = f"[Trang {page_index + 1}/{total_pages}]\n```ansi\n{table}\n```"
+    if len(content) <= 2000:
+        return content
+
+    table_no_legend = _build_table(rows, include_legend=False)
+    content_no_legend = f"[Trang {page_index + 1}/{total_pages}]\n```ansi\n{table_no_legend}\n```"
+    if len(content_no_legend) <= 2000:
+        return content_no_legend
+
+    compact_lines = [f"#{r['pos']} {r['name']} | {r['elo']} | {_rank_key(r['elo'])} | {r['total_matches']} trận" for r in rows]
+    compact_body = "\n".join(compact_lines)
+    compact_content = f"[Trang {page_index + 1}/{total_pages}]\n```\n{compact_body}\n```"
+    if len(compact_content) <= 2000:
+        return compact_content
+
+    # Last-resort clamp, should be extremely rare with PAGE_SIZE=4.
+    return compact_content[:1990] + "..."
 
 
 def _fetch_leaderboard_page(
@@ -266,18 +286,21 @@ def _fetch_leaderboard_page(
         user_ids = [u.id for u in users]
         match_count_map: dict[int, int] = {}
         if user_ids:
-            match_counts_raw = session.execute(
-                sa_text("""
-                    SELECT elem::bigint AS user_id, COUNT(*) AS cnt
-                    FROM   lobbies,
-                           jsonb_array_elements_text(users_list) AS elem
-                    WHERE  status = 'finished'
-                      AND  elem::bigint = ANY(:ids)
-                    GROUP  BY elem::bigint
-                """),
-                {"ids": user_ids},
-            ).fetchall()
-            match_count_map = {row.user_id: row.cnt for row in match_counts_raw}
+            # Count per displayed user only. This avoids expanding every users_list
+            # value in the whole lobbies table, which can become very slow.
+            for uid in user_ids:
+                cnt = session.execute(
+                    sa_text(
+                        """
+                        SELECT COUNT(*)
+                        FROM lobbies
+                        WHERE status = 'finished'
+                          AND users_list @> CAST(:needle AS jsonb)
+                        """
+                    ),
+                    {"needle": f"[{uid}]"},
+                ).scalar_one()
+                match_count_map[uid] = int(cnt)
 
     now = now_vn()
     current_month = (now.year, now.month)
@@ -350,7 +373,18 @@ class LeaderboardPaginationView(discord.ui.View):
         self.page = normalized_page
         self._sync_controls()
         content = _build_page_content(rows, self.page, self.total_pages)
-        await interaction.response.edit_message(content=content, view=self)
+        try:
+            await interaction.response.edit_message(content=content, view=self)
+        except discord.HTTPException:
+            log.exception(
+                "Failed to edit leaderboard page (user=%s, page=%s)",
+                interaction.user.id,
+                self.page,
+            )
+            await interaction.response.edit_message(
+                content="❌ Không thể hiển thị trang này do nội dung quá dài.",
+                view=self,
+            )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -452,8 +486,17 @@ def register_leaderboard_commands(bot: ext_commands.Bot, db_session_factory) -> 
         view.page = normalized_page
         view._sync_controls()
 
-        msg = await interaction.followup.send(content=content, view=view, wait=True)
-        view.message = msg
+        try:
+            msg = await interaction.followup.send(content=content, view=view, wait=True)
+            view.message = msg
+        except discord.HTTPException:
+            log.exception("Failed to send leaderboard message (user=%s)", interaction.user.id)
+            await safe_send_interaction(
+                interaction,
+                "leaderboard",
+                "❌ Không thể hiển thị bảng xếp hạng do nội dung quá dài.",
+                ephemeral=True,
+            )
 
     # @bot.tree.command(
     #     name="ansi_256_test",
