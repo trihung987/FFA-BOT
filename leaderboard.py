@@ -47,12 +47,12 @@ PAGE_SIZE = 5
 
 # ── Column widths (number of visible characters, not bytes) ───────────────────
 W_POS     = 4   # # (supports #10, #100 without truncation)
-W_NAME    = 14  # Người chơi
+W_NAME    = 12  # Người chơi
 W_ELO     = 4   # ELO
-W_TIER    = 12  # Tier (icon + name)
+W_TIER    = 10  # Tier (icon + name)
 W_MATCHES = 5   # Tổng trận
-W_DELTA   = 7   # Biến động
-W_MONTHLY = 8   # ELO tháng
+W_DELTA   = 6   # Biến động
+W_MONTHLY = 6   # ELO tháng
 
 # ── Low-level helpers ──────────────────────────────────────────────────────────
 
@@ -157,15 +157,15 @@ def _row_with_colored_tier(
     monthly = _fmt_delta(monthly_elo_gain)
 
     parts = [
-        f" {_ansi(_cell(pos, W_POS, 'right'), tier_ansi_code)} ",
-        f" {_ansi(_cell(name, W_NAME, 'left'), tier_ansi_code)} ",
-        f" {_ansi(_cell(elo, W_ELO, 'right'), tier_ansi_code)} ",
+        f" {_cell(pos, W_POS, 'right')} ",
+        f" {_cell(name, W_NAME, 'left')} ",
+        f" {_cell(elo, W_ELO, 'right')} ",
         f" {_ansi(_cell(tier_plain, W_TIER, 'left'), tier_ansi_code)} ",
-        f" {_ansi(_cell(matches, W_MATCHES, 'right'), tier_ansi_code)} ",
+        f" {_cell(matches, W_MATCHES, 'right')} ",
         f" {_ansi(_cell(delta, W_DELTA, 'right'), delta_color)} ",
         f" {_ansi(_cell(monthly, W_MONTHLY, 'right'), monthly_color)} ",
     ]
-    return _border_char("║") + _border_char("║").join(parts) + _border_char("║")
+    return "║" + "║".join(parts) + "║"
 
 
 # ── Table builder ──────────────────────────────────────────────────────────────
@@ -182,21 +182,9 @@ def _build_table(rows: list[dict]) -> str:
         monthly_elo_gain int
         total_matches    int
     """
-    # Title spans near full width; keep 1-char shorter to fix right-border drift.
-    inner = sum(w + 2 for w in _SEGS) + len(_SEGS) - 1
-    title_plain = "★ BẢNG XẾP HẠNG ELO FFA ★"
-    title_centered = _cell(title_plain, inner - 1, "center")
-    title_row = _border_char("║") + _ansi(title_centered, HEADER_ANSI) + _border_char("║")
-
     header_aligns = ["center", "center", "center", "center", "center", "center", "center"]
     header_row_1 = _row(
-        "#", "Người chơi", "ELO", "Tier", "Tổng", "Biến", "ELO",
-        aligns=header_aligns,
-        cell_color=HEADER_ANSI,
-        color_border=True,
-    )
-    header_row_2 = _row(
-        "", "", "", "", "trận", "động", "tháng",
+        "#", "Người chơi", "ELO", "Tier", "Trận", "Biến", "Tháng",
         aligns=header_aligns,
         cell_color=HEADER_ANSI,
         color_border=True,
@@ -204,10 +192,7 @@ def _build_table(rows: list[dict]) -> str:
 
     lines = [
         _hline("╔", "╦", "╗"),
-        title_row,
-        _hline("╠", "╦", "╣"),
         header_row_1,
-        header_row_2,
         _hline("╠", "╬", "╣"),
     ]
 
@@ -231,14 +216,24 @@ def _build_table(rows: list[dict]) -> str:
         )
 
     lines.append(_hline("╚", "╩", "╝"))
-    lines.append(_ansi("★ Challenger", "31") + "  " + _ansi("◆ Legendary", "35") + "  " + _ansi("♦ Diamond", "34") + "  " + _ansi("● Platinum", "36") + "  " + _ansi("▲ Gold", "33") + "  " + _ansi("▶ Silver", "37") + "  " + _ansi("▼ Bronze", "37"))
     return "\n".join(lines)
 
 
 def _build_page_content(rows: list[dict], page_index: int, total_pages: int) -> str:
-    table = _build_table(rows)
     title = "## **BẢNG XẾP HẠNG FFA**"
-    return f"{title}\n[Trang {page_index + 1}/{total_pages}]\n```ansi\n{table}\n```"
+    table = _build_table(rows)
+    content = f"{title}\n[Trang {page_index + 1}/{total_pages}]\n```ansi\n{table}\n```"
+    if len(content) <= 2000:
+        return content
+
+    # Fallback safety: drop markdown title if content is still too long.
+    content = f"[Trang {page_index + 1}/{total_pages}]\n```ansi\n{table}\n```"
+    if len(content) <= 2000:
+        return content
+
+    # Last-resort safety: trim table body to keep Discord message under 2000 chars.
+    allowed = 2000 - len(f"[Trang {page_index + 1}/{total_pages}]\n```ansi\n\n```")
+    return f"[Trang {page_index + 1}/{total_pages}]\n```ansi\n{table[:max(0, allowed)]}\n```"
 
 
 def _fetch_leaderboard_page(
