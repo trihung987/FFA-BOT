@@ -1215,6 +1215,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                 display_messages: list[str] = []
                 display_file = None
                 mentions = ""
+                display_message_ids: list[int] = []
                 with db_session_factory() as session:
                     db_lobby = session.get(Lobby, lobby_id)
                     db_match = session.get(Match, match_id)
@@ -1232,7 +1233,8 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                             description="Không thể tải thông tin lobby.",
                             color=discord.Color.blue(),
                         )
-                    await divide_channel.send(content=mentions or None, embed=display_embed, file=display_file)
+                    sent_msg = await divide_channel.send(content=mentions or None, embed=display_embed, file=display_file)
+                    display_message_ids.append(sent_msg.id)
                 else:
                     if display_messages:
                         fallback_embed = discord.Embed(
@@ -1240,9 +1242,18 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                             description=display_messages[0],
                             color=discord.Color.blue(),
                         )
-                        await divide_channel.send(content=mentions or None, embed=fallback_embed)
+                        first_msg = await divide_channel.send(content=mentions or None, embed=fallback_embed)
+                        display_message_ids.append(first_msg.id)
                         for extra_message in display_messages[1:]:
-                            await divide_channel.send(content=extra_message)
+                            extra_msg = await divide_channel.send(content=extra_message)
+                            display_message_ids.append(extra_msg.id)
+
+                if display_message_ids:
+                    with db_session_factory() as session:
+                        db_lobby = session.get(Lobby, lobby_id)
+                        if db_lobby is not None:
+                            db_lobby.display_message_ids = display_message_ids
+                            session.commit()
             except Exception:
                 log.exception("test_flow: failed to send lobby display message (lobby=%s)", lobby_id)
 
