@@ -493,29 +493,49 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             )
             return
 
+        new_display_ids: list[int] = []
+        mentions = " ".join(f"<@{uid}>" for uid in (lobby_snap.users_list or []))
+        display_file = await build_lobby_display_image_file(lobby_snap, match_snap, p_map)
+
+        existing_messages: list[discord.Message] = []
         for message_id in old_display_ids:
             try:
-                msg = await channel.fetch_message(message_id)
-                await msg.delete()
+                existing_messages.append(await channel.fetch_message(message_id))
             except discord.NotFound:
                 continue
             except discord.HTTPException as exc:
                 log.warning(
-                    "reroll_lobby_civs: failed deleting old display message (lobby=%s, msg=%s): %s",
+                    "reroll_lobby_civs: failed fetching old display message (lobby=%s, msg=%s): %s",
                     lobby_id,
                     message_id,
                     exc,
                 )
 
-        new_display_ids: list[int] = []
-        mentions = " ".join(f"<@{uid}>" for uid in (lobby_snap.users_list or []))
-        display_file = await build_lobby_display_image_file(lobby_snap, match_snap, p_map)
-
         try:
             if display_file is not None:
                 display_embed = build_lobby_display_embed(lobby_snap, match_snap)
-                new_msg = await channel.send(content=mentions or None, embed=display_embed, file=display_file)
-                new_display_ids.append(new_msg.id)
+                if existing_messages:
+                    edited_msg = existing_messages[0]
+                    await edited_msg.edit(
+                        content=mentions or None,
+                        embed=display_embed,
+                        attachments=[display_file],
+                    )
+                    new_display_ids.append(edited_msg.id)
+                else:
+                    new_msg = await channel.send(content=mentions or None, embed=display_embed, file=display_file)
+                    new_display_ids.append(new_msg.id)
+
+                for stale_msg in existing_messages[1:]:
+                    try:
+                        await stale_msg.delete()
+                    except discord.HTTPException as exc:
+                        log.warning(
+                            "reroll_lobby_civs: failed deleting stale display message (lobby=%s, msg=%s): %s",
+                            lobby_id,
+                            stale_msg.id,
+                            exc,
+                        )
             else:
                 display_messages = build_lobby_display_messages(lobby_snap, match_snap, p_map)
                 if display_messages:
@@ -524,11 +544,34 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                         description=display_messages[0],
                         color=discord.Color.blue(),
                     )
-                    first_msg = await channel.send(content=mentions or None, embed=fallback_embed)
-                    new_display_ids.append(first_msg.id)
-                    for extra_message in display_messages[1:]:
-                        extra_msg = await channel.send(content=extra_message)
-                        new_display_ids.append(extra_msg.id)
+
+                    if existing_messages:
+                        first_msg = existing_messages[0]
+                        await first_msg.edit(content=mentions or None, embed=fallback_embed, attachments=[])
+                        new_display_ids.append(first_msg.id)
+                    else:
+                        first_msg = await channel.send(content=mentions or None, embed=fallback_embed)
+                        new_display_ids.append(first_msg.id)
+
+                    for idx, extra_message in enumerate(display_messages[1:], start=1):
+                        if idx < len(existing_messages):
+                            msg = existing_messages[idx]
+                            await msg.edit(content=extra_message, embed=None, attachments=[])
+                            new_display_ids.append(msg.id)
+                        else:
+                            extra_msg = await channel.send(content=extra_message)
+                            new_display_ids.append(extra_msg.id)
+
+                    for stale_msg in existing_messages[len(display_messages):]:
+                        try:
+                            await stale_msg.delete()
+                        except discord.HTTPException as exc:
+                            log.warning(
+                                "reroll_lobby_civs: failed deleting stale display message (lobby=%s, msg=%s): %s",
+                                lobby_id,
+                                stale_msg.id,
+                                exc,
+                            )
         except Exception:
             log.exception(
                 "reroll_lobby_civs: failed sending refreshed display messages (lobby=%s)",
@@ -557,7 +600,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         await safe_send_interaction(
             interaction,
             "reroll_lobby_civs",
-            f"✅ Đã random lại civ cho lobby #{lobby_id} và cập nhật message chia civ mới.",
+            f"✅ Đã random lại civ cho lobby #{lobby_id} và cập nhật lại message chia civ.",
             ephemeral=True,
         )
 
