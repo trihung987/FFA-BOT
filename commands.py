@@ -701,7 +701,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
 
     # ── Admin: demo paginated score modal ───────────────────────────────────
 
-    _DEMO_MODAL_PAGE_SIZE = 5
+    _DEMO_MODAL_PAGE_SIZE = 4
 
     def _chunk_demo_entries(entries: list[tuple[str, str]], page_size: int) -> list[list[tuple[str, str]]]:
         if page_size <= 0:
@@ -713,6 +713,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             super().__init__(timeout=timeout)
             self.allowed_user_id = allowed_user_id
             self.modal_factory = modal_factory
+            self._opening = False
 
         @discord.ui.button(label="Mở trang tiếp theo", style=discord.ButtonStyle.primary)
         async def open_next_page(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -725,15 +726,19 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                 )
                 return
 
-            button.disabled = True
-            try:
-                await interaction.response.edit_message(view=self)
-            except discord.HTTPException:
-                pass
+            if self._opening:
+                await safe_send_interaction(
+                    interaction,
+                    "demo_score_modal.open_next_page",
+                    "⏳ Đang mở trang tiếp theo, vui lòng đợi.",
+                    ephemeral=True,
+                )
+                return
+            self._opening = True
 
             modal = self.modal_factory()
             try:
-                await interaction.followup.send_modal(modal)
+                await interaction.response.send_modal(modal)
             except discord.NotFound as exc:
                 if is_interaction_expired(exc):
                     log.warning("Interaction expired in demo_score_modal next-page (user=%s)", interaction.user.id)
@@ -741,6 +746,8 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                     log.error("NotFound opening demo_score_modal next-page (user=%s): %s", interaction.user.id, exc)
             except discord.HTTPException as exc:
                 log.error("HTTP error opening demo_score_modal next-page (user=%s): %s", interaction.user.id, exc)
+            finally:
+                self._opening = False
 
     class DemoScoreModal(discord.ui.Modal):
         def __init__(

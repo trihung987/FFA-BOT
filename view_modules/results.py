@@ -211,7 +211,7 @@ def build_lobby_result_message_assets(lobby, match, p_map: dict[int, str] | None
     return embed, image_file
 
 
-_MODAL_PAGE_SIZE = 5
+_MODAL_PAGE_SIZE = 4
 
 
 def _chunk_entries(entries: list[tuple[str, str]], page_size: int) -> list[list[tuple[str, str]]]:
@@ -225,6 +225,7 @@ class ScoreModalNextPageView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.allowed_user_id = allowed_user_id
         self.modal_factory = modal_factory
+        self._opening = False
 
     @discord.ui.button(label="Mở trang tiếp theo", style=discord.ButtonStyle.primary)
     async def open_next_page(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -237,15 +238,19 @@ class ScoreModalNextPageView(discord.ui.View):
             )
             return
 
-        button.disabled = True
-        try:
-            await interaction.response.edit_message(view=self)
-        except discord.HTTPException:
-            pass
+        if self._opening:
+            await _safe_send(
+                interaction,
+                "ScoreModalNextPageView.open_next_page",
+                "⏳ Đang mở trang tiếp theo, vui lòng đợi.",
+                ephemeral=True,
+            )
+            return
+        self._opening = True
 
         modal = self.modal_factory()
         try:
-            await interaction.followup.send_modal(modal)
+            await interaction.response.send_modal(modal)
         except discord.NotFound as exc:
             if exc.code == 10062:
                 log.warning(
@@ -264,6 +269,8 @@ class ScoreModalNextPageView(discord.ui.View):
                 interaction.user.id,
                 exc,
             )
+        finally:
+            self._opening = False
 
 
 class ScoreModal(discord.ui.Modal):
