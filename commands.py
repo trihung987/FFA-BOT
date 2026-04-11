@@ -432,7 +432,12 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                         }
 
                 lobby.civs = new_civs
-                old_display_ids = list(lobby.display_message_ids or [])
+                old_display_ids = []
+                for raw_id in (lobby.display_message_ids or []):
+                    try:
+                        old_display_ids.append(int(raw_id))
+                    except (TypeError, ValueError):
+                        continue
 
                 users = session.query(User).filter(User.id.in_(player_ids)).all() if player_ids else []
                 p_map = {u.id: (u.ingame_name or "Unknown") for u in users}
@@ -510,6 +515,21 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
                     message_id,
                     exc,
                 )
+
+        # If DB already tracks display message IDs, enforce updating those messages
+        # and avoid posting new ones unexpectedly.
+        if old_display_ids and not existing_messages:
+            await safe_send_interaction(
+                interaction,
+                "reroll_lobby_civs",
+                (
+                    f"⚠️ Đã random civ cho lobby #{lobby_id} trong DB, "
+                    "nhưng không tìm thấy message lobby cũ theo ID đã lưu để cập nhật. "
+                    "Bot sẽ không gửi message mới để tránh trùng."
+                ),
+                ephemeral=True,
+            )
+            return
 
         try:
             if display_file is not None:
