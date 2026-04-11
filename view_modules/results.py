@@ -214,6 +214,58 @@ def build_lobby_result_message_assets(lobby, match, p_map: dict[int, str] | None
 _MODAL_PAGE_SIZE = 5
 
 
+def _chunk_entries(entries: list[tuple[str, str]], page_size: int) -> list[list[tuple[str, str]]]:
+    if page_size <= 0:
+        return [entries]
+    return [entries[i:i + page_size] for i in range(0, len(entries), page_size)] or [[]]
+
+
+class ScoreModalNextPageView(discord.ui.View):
+    def __init__(self, allowed_user_id: int, modal_factory, *, timeout: float = 300) -> None:
+        super().__init__(timeout=timeout)
+        self.allowed_user_id = allowed_user_id
+        self.modal_factory = modal_factory
+
+    @discord.ui.button(label="Mở trang tiếp theo", style=discord.ButtonStyle.primary)
+    async def open_next_page(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.user.id != self.allowed_user_id:
+            await _safe_send(
+                interaction,
+                "ScoreModalNextPageView.open_next_page",
+                "❌ Bạn không thể mở phiên nhập điểm của người khác.",
+                ephemeral=True,
+            )
+            return
+
+        button.disabled = True
+        try:
+            await interaction.response.edit_message(view=self)
+        except discord.HTTPException:
+            pass
+
+        modal = self.modal_factory()
+        try:
+            await interaction.followup.send_modal(modal)
+        except discord.NotFound as exc:
+            if exc.code == 10062:
+                log.warning(
+                    "Interaction expired opening next score page (user=%s)",
+                    interaction.user.id,
+                )
+            else:
+                log.error(
+                    "NotFound opening next score page (user=%s): %s",
+                    interaction.user.id,
+                    exc,
+                )
+        except discord.HTTPException as exc:
+            log.error(
+                "HTTP error opening next score page (user=%s): %s",
+                interaction.user.id,
+                exc,
+            )
+
+
 class ScoreModal(discord.ui.Modal):
     def __init__(
         self,
@@ -226,8 +278,11 @@ class ScoreModal(discord.ui.Modal):
         result_message_id: int | None = None,
         result_channel_id: int | None = None,
         result_view=None,
+        page_index: int = 1,
+        total_pages: int = 1,
     ) -> None:
-        super().__init__(title=f"Nhập điểm Trận {fight_idx}")
+        page_suffix = f" ({page_index}/{total_pages})" if total_pages > 1 else ""
+        super().__init__(title=f"Nhập điểm Trận {fight_idx}{page_suffix}")
         self.lobby_id = lobby_id
         self.fight_idx = fight_idx
         self.db_session_factory = db_session_factory
@@ -236,6 +291,8 @@ class ScoreModal(discord.ui.Modal):
         self.result_message_id = result_message_id
         self.result_channel_id = result_channel_id
         self.result_view = result_view
+        self.page_index = page_index
+        self.total_pages = total_pages
 
         self._inputs: list[tuple[str, discord.ui.TextInput]] = []
         for key, label in page_entries:
@@ -264,30 +321,48 @@ class ScoreModal(discord.ui.Modal):
         new_scores = {key: inp.value for key, inp in self._inputs}
 
         if self.overflow_entries:
-            modal2 = ScoreModal(
-                lobby_id=self.lobby_id,
-                fight_idx=self.fight_idx,
-                page_entries=self.overflow_entries,
-                db_session_factory=self.db_session_factory,
-                overflow_entries=[],
-                partial_scores={**self.partial_scores, **new_scores},
-                result_message_id=self.result_message_id,
-                result_channel_id=self.result_channel_id,
-                result_view=self.result_view,
-            )
+            next_page_entries = self.overflow_entries[:_MODAL_PAGE_SIZE]
+            next_overflow_entries = self.overflow_entries[_MODAL_PAGE_SIZE:]
+            merged_scores = {**self.partial_scores, **new_scores}
+
+            def _build_next_modal() -> ScoreModal:
+                return ScoreModal(
+                    lobby_id=self.lobby_id,
+                    fight_idx=self.fight_idx,
+                    page_entries=next_page_entries,
+                    db_session_factory=self.db_session_factory,
+                    overflow_entries=next_overflow_entries,
+                    partial_scores=merged_scores,
+                    result_message_id=self.result_message_id,
+                    result_channel_id=self.result_channel_id,
+                    result_view=self.result_view,
+                    page_index=self.page_index + 1,
+                    total_pages=self.total_pages,
+                )
+
+            next_view = ScoreModalNextPageView(interaction.user.id, _build_next_modal)
             try:
-                await interaction.response.send_modal(modal2)
+                await _safe_send(
+                    interaction,
+                    f"ScoreModal.on_submit.next_page lobby={self.lobby_id}",
+                    content=(
+                        f"✅ Đã lưu tạm điểm trang {self.page_index}/{self.total_pages}.\n"
+                        f"➡️ Nhấn **Mở trang tiếp theo** để nhập tiếp trang {self.page_index + 1}/{self.total_pages}."
+                    ),
+                    view=next_view,
+                    ephemeral=True,
+                )
             except discord.NotFound as exc:
                 if exc.code == 10062:
                     log.warning(
-                        "Interaction expired chaining ScoreModal page 2 (lobby=%s, fight=%s, user=%s)",
+                        "Interaction expired preparing next ScoreModal page (lobby=%s, fight=%s, user=%s)",
                         self.lobby_id,
                         self.fight_idx,
                         interaction.user.id,
                     )
                 else:
                     log.error(
-                        "NotFound chaining ScoreModal page 2 (lobby=%s, fight=%s, user=%s): %s",
+                        "NotFound preparing next ScoreModal page (lobby=%s, fight=%s, user=%s): %s",
                         self.lobby_id,
                         self.fight_idx,
                         interaction.user.id,
@@ -295,7 +370,7 @@ class ScoreModal(discord.ui.Modal):
                     )
             except discord.HTTPException as exc:
                 log.error(
-                    "HTTP error chaining ScoreModal page 2 (lobby=%s, fight=%s, user=%s): %s",
+                    "HTTP error preparing next ScoreModal page (lobby=%s, fight=%s, user=%s): %s",
                     self.lobby_id,
                     self.fight_idx,
                     interaction.user.id,
@@ -728,8 +803,10 @@ class LobbyResultView(discord.ui.View):
             entries.append((str(uid), label))
             partial_scores[str(uid)] = str(_safe_int_score(fight_scores_raw.get(str(uid), 0)))
 
-        page1 = entries[:_MODAL_PAGE_SIZE]
-        overflow = entries[_MODAL_PAGE_SIZE:]
+        pages = _chunk_entries(entries, _MODAL_PAGE_SIZE)
+        page1 = pages[0]
+        overflow = [entry for page in pages[1:] for entry in page]
+        total_pages = len(pages)
 
         modal = ScoreModal(
             lobby_id=self.lobby_id,
@@ -741,6 +818,8 @@ class LobbyResultView(discord.ui.View):
             result_message_id=result_msg_id,
             result_channel_id=RESULT_CHANNEL_ID,
             result_view=self,
+            page_index=1,
+            total_pages=total_pages,
         )
         try:
             await interaction.response.send_modal(modal)

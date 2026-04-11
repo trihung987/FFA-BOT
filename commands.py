@@ -3,6 +3,7 @@ Slash commands for trận management.
 """
 
 import logging
+import types
 from datetime import timedelta
 
 import discord
@@ -352,6 +353,214 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
         """Admin: remove *amount* tickets from a player's account."""
         await _change_ticket(interaction, player, amount, add=False, context="remove_ticket")
 
+    @bot.tree.command(
+        name="reroll_lobby_civs",
+        description="[Admin] Random lại civ của một lobby và cập nhật lại message chia civ.",
+        guild=guild_obj,
+    )
+    @app_commands.describe(lobby_id="ID lobby cần random lại civ")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def reroll_lobby_civs(
+        interaction: discord.Interaction,
+        lobby_id: int,
+    ) -> None:
+        """[Admin] Regenerate civ assignment for a lobby and refresh its display message."""
+        from config import DIVIDE_LOBBY_CHANNEL_ID
+        from entity import Lobby, Match, User
+        from lobby_division import (
+            assign_civs,
+            _build_emoji_map,
+            _resolve_emoji_str,
+            build_lobby_display_embed,
+            build_lobby_display_image_file,
+            build_lobby_display_messages,
+        )
+
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except discord.HTTPException as exc:
+                if exc.code != 40060:
+                    log.error(
+                        "reroll_lobby_civs: failed to defer interaction (admin=%s, lobby=%s): %s",
+                        interaction.user.id,
+                        lobby_id,
+                        exc,
+                    )
+                    await safe_send_interaction(
+                        interaction,
+                        "reroll_lobby_civs",
+                        "❌ Không thể bắt đầu xử lý lệnh.",
+                        ephemeral=True,
+                    )
+                    return
+
+        try:
+            with db_session_factory() as session:
+                lobby = session.get(Lobby, lobby_id)
+                if lobby is None:
+                    await safe_send_interaction(
+                        interaction,
+                        "reroll_lobby_civs",
+                        f"❌ Không tìm thấy lobby #{lobby_id}.",
+                        ephemeral=True,
+                    )
+                    return
+
+                match = session.get(Match, lobby.match_id)
+                if match is None:
+                    await safe_send_interaction(
+                        interaction,
+                        "reroll_lobby_civs",
+                        f"❌ Lobby #{lobby_id} không còn trận liên kết trong DB.",
+                        ephemeral=True,
+                    )
+                    return
+
+                player_ids = list(lobby.users_list or [])
+                ai_count = int(lobby.ai_count or 0)
+                all_civ_keys = [str(uid) for uid in player_ids] + [f"AI_{i + 1}" for i in range(ai_count)]
+
+                new_civs = assign_civs(all_civ_keys, int(match.count_fight or 0))
+
+                if interaction.guild:
+                    emoji_map = _build_emoji_map(interaction.guild)
+                    if emoji_map:
+                        new_civs = {
+                            key: [_resolve_emoji_str(c, emoji_map) for c in civ_list]
+                            for key, civ_list in new_civs.items()
+                        }
+
+                lobby.civs = new_civs
+                old_display_ids = list(lobby.display_message_ids or [])
+
+                users = session.query(User).filter(User.id.in_(player_ids)).all() if player_ids else []
+                p_map = {u.id: (u.ingame_name or "Unknown") for u in users}
+
+                session.commit()
+
+                lobby_snap = types.SimpleNamespace(
+                    id=lobby.id,
+                    match_id=lobby.match_id,
+                    tier=lobby.tier,
+                    lobby_number=lobby.lobby_number,
+                    users_list=list(lobby.users_list or []),
+                    ai_count=int(lobby.ai_count or 0),
+                    civs=dict(lobby.civs or {}),
+                    scores=dict(lobby.scores or {}),
+                    status=lobby.status,
+                    voice_channel_ids=list(lobby.voice_channel_ids or []),
+                    text_channel_ids=list(lobby.text_channel_ids or []),
+                    result_message_id=lobby.result_message_id,
+                )
+                match_snap = types.SimpleNamespace(
+                    id=match.id,
+                    count_fight=match.count_fight,
+                    name_maps=list(match.name_maps or []),
+                    time_start=match.time_start,
+                    time_reach_checkin=match.time_reach_checkin,
+                    time_reach_divide_lobby=match.time_reach_divide_lobby,
+                )
+        except ValueError as exc:
+            await safe_send_interaction(
+                interaction,
+                "reroll_lobby_civs",
+                f"❌ Không thể random civ cho lobby #{lobby_id}: {exc}",
+                ephemeral=True,
+            )
+            return
+        except Exception:
+            log.exception(
+                "reroll_lobby_civs: DB/random error (admin=%s, lobby=%s)",
+                interaction.user.id,
+                lobby_id,
+            )
+            await safe_send_interaction(
+                interaction,
+                "reroll_lobby_civs",
+                "❌ Đã xảy ra lỗi nội bộ khi random lại civ.",
+                ephemeral=True,
+            )
+            return
+
+        channel = interaction.client.get_channel(DIVIDE_LOBBY_CHANNEL_ID) if DIVIDE_LOBBY_CHANNEL_ID else None
+        if channel is None:
+            await safe_send_interaction(
+                interaction,
+                "reroll_lobby_civs",
+                f"✅ Đã random lại civ cho lobby #{lobby_id} trong DB. Không tìm thấy kênh chia lobby để cập nhật message.",
+                ephemeral=True,
+            )
+            return
+
+        for message_id in old_display_ids:
+            try:
+                msg = await channel.fetch_message(message_id)
+                await msg.delete()
+            except discord.NotFound:
+                continue
+            except discord.HTTPException as exc:
+                log.warning(
+                    "reroll_lobby_civs: failed deleting old display message (lobby=%s, msg=%s): %s",
+                    lobby_id,
+                    message_id,
+                    exc,
+                )
+
+        new_display_ids: list[int] = []
+        mentions = " ".join(f"<@{uid}>" for uid in (lobby_snap.users_list or []))
+        display_file = await build_lobby_display_image_file(lobby_snap, match_snap, p_map)
+
+        try:
+            if display_file is not None:
+                display_embed = build_lobby_display_embed(lobby_snap, match_snap)
+                new_msg = await channel.send(content=mentions or None, embed=display_embed, file=display_file)
+                new_display_ids.append(new_msg.id)
+            else:
+                display_messages = build_lobby_display_messages(lobby_snap, match_snap, p_map)
+                if display_messages:
+                    fallback_embed = discord.Embed(
+                        title=f"🎮 Chia Lobby - Trận #{match_snap.id}",
+                        description=display_messages[0],
+                        color=discord.Color.blue(),
+                    )
+                    first_msg = await channel.send(content=mentions or None, embed=fallback_embed)
+                    new_display_ids.append(first_msg.id)
+                    for extra_message in display_messages[1:]:
+                        extra_msg = await channel.send(content=extra_message)
+                        new_display_ids.append(extra_msg.id)
+        except Exception:
+            log.exception(
+                "reroll_lobby_civs: failed sending refreshed display messages (lobby=%s)",
+                lobby_id,
+            )
+            await safe_send_interaction(
+                interaction,
+                "reroll_lobby_civs",
+                f"⚠️ Đã random civ và lưu DB cho lobby #{lobby_id}, nhưng gửi message chia civ mới thất bại.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            with db_session_factory() as session:
+                db_lobby = session.get(Lobby, lobby_id)
+                if db_lobby is not None:
+                    db_lobby.display_message_ids = new_display_ids
+                    session.commit()
+        except Exception:
+            log.exception(
+                "reroll_lobby_civs: DB error saving new display message IDs (lobby=%s)",
+                lobby_id,
+            )
+
+        await safe_send_interaction(
+            interaction,
+            "reroll_lobby_civs",
+            f"✅ Đã random lại civ cho lobby #{lobby_id} và cập nhật message chia civ mới.",
+            ephemeral=True,
+        )
+
     # ── View player FFA stats ─────────────────────────────────────────────────
 
     async def _send_ffa_profile(
@@ -489,6 +698,196 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
     async def ffa_me(interaction: discord.Interaction) -> None:
         """Display a rich embed with the invoker's own FFA stats."""
         await _send_ffa_profile(interaction, interaction.user, context="ffa_me")
+
+    # ── Admin: demo paginated score modal ───────────────────────────────────
+
+    _DEMO_MODAL_PAGE_SIZE = 5
+
+    def _chunk_demo_entries(entries: list[tuple[str, str]], page_size: int) -> list[list[tuple[str, str]]]:
+        if page_size <= 0:
+            return [entries]
+        return [entries[i:i + page_size] for i in range(0, len(entries), page_size)] or [[]]
+
+    class DemoScoreNextPageView(discord.ui.View):
+        def __init__(self, allowed_user_id: int, modal_factory, *, timeout: float = 300) -> None:
+            super().__init__(timeout=timeout)
+            self.allowed_user_id = allowed_user_id
+            self.modal_factory = modal_factory
+
+        @discord.ui.button(label="Mở trang tiếp theo", style=discord.ButtonStyle.primary)
+        async def open_next_page(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+            if interaction.user.id != self.allowed_user_id:
+                await safe_send_interaction(
+                    interaction,
+                    "demo_score_modal.open_next_page",
+                    "❌ Bạn không thể mở phiên demo của người khác.",
+                    ephemeral=True,
+                )
+                return
+
+            button.disabled = True
+            try:
+                await interaction.response.edit_message(view=self)
+            except discord.HTTPException:
+                pass
+
+            modal = self.modal_factory()
+            try:
+                await interaction.followup.send_modal(modal)
+            except discord.NotFound as exc:
+                if is_interaction_expired(exc):
+                    log.warning("Interaction expired in demo_score_modal next-page (user=%s)", interaction.user.id)
+                else:
+                    log.error("NotFound opening demo_score_modal next-page (user=%s): %s", interaction.user.id, exc)
+            except discord.HTTPException as exc:
+                log.error("HTTP error opening demo_score_modal next-page (user=%s): %s", interaction.user.id, exc)
+
+    class DemoScoreModal(discord.ui.Modal):
+        def __init__(
+            self,
+            fight_idx: int,
+            page_entries: list[tuple[str, str]],
+            overflow_entries: list[tuple[str, str]] | None = None,
+            partial_scores: dict[str, str] | None = None,
+            page_index: int = 1,
+            total_pages: int = 1,
+        ) -> None:
+            page_suffix = f" ({page_index}/{total_pages})" if total_pages > 1 else ""
+            super().__init__(title=f"Demo nhập điểm Trận {fight_idx}{page_suffix}")
+            self.fight_idx = fight_idx
+            self.overflow_entries = overflow_entries or []
+            self.partial_scores = partial_scores or {}
+            self.page_index = page_index
+            self.total_pages = total_pages
+            self._inputs: list[tuple[str, str, discord.ui.TextInput]] = []
+
+            for key, label in page_entries:
+                inp = discord.ui.TextInput(
+                    label=label,
+                    placeholder="Nhập điểm số",
+                    default=self.partial_scores.get(key, "0"),
+                    required=True,
+                    max_length=10,
+                )
+                self._inputs.append((key, label, inp))
+                self.add_item(inp)
+
+        async def on_submit(self, interaction: discord.Interaction) -> None:
+            new_scores = {key: inp.value for key, _, inp in self._inputs}
+            merged_scores = {**self.partial_scores, **new_scores}
+
+            if self.overflow_entries:
+                next_page_entries = self.overflow_entries[:_DEMO_MODAL_PAGE_SIZE]
+                next_overflow_entries = self.overflow_entries[_DEMO_MODAL_PAGE_SIZE:]
+
+                def _build_next_modal() -> DemoScoreModal:
+                    return DemoScoreModal(
+                        fight_idx=self.fight_idx,
+                        page_entries=next_page_entries,
+                        overflow_entries=next_overflow_entries,
+                        partial_scores=merged_scores,
+                        page_index=self.page_index + 1,
+                        total_pages=self.total_pages,
+                    )
+
+                next_view = DemoScoreNextPageView(interaction.user.id, _build_next_modal)
+                await safe_send_interaction(
+                    interaction,
+                    "demo_score_modal.on_submit",
+                    (
+                        f"✅ Demo đã lưu tạm trang {self.page_index}/{self.total_pages}.\n"
+                        f"➡️ Nhấn **Mở trang tiếp theo** để nhập trang {self.page_index + 1}/{self.total_pages}."
+                    ),
+                    view=next_view,
+                    ephemeral=True,
+                )
+                return
+
+            label_map = {key: label for key, label, _ in self._inputs}
+            lines: list[str] = []
+            for key in sorted(merged_scores.keys(), key=lambda item: int(item.split("_")[-1])):
+                display = label_map.get(key, key)
+                lines.append(f"- {display}: **{merged_scores[key]}**")
+
+            summary = "\n".join(lines) if lines else "_(không có dữ liệu)_"
+            await safe_send_interaction(
+                interaction,
+                "demo_score_modal.on_submit",
+                (
+                    f"✅ Demo hoàn tất nhập điểm Trận {self.fight_idx}.\n"
+                    f"Tổng số người: **{len(merged_scores)}**\n\n"
+                    f"{summary}"
+                ),
+                ephemeral=True,
+            )
+
+        async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+            log.exception("Unhandled error in DemoScoreModal (user=%s)", interaction.user.id)
+            await safe_send_interaction(
+                interaction,
+                "demo_score_modal.on_error",
+                "❌ Demo modal gặp lỗi không mong muốn.",
+                ephemeral=True,
+            )
+
+    @bot.tree.command(
+        name="demo_score_modal",
+        description="[Admin] Demo modal nhập điểm phân trang để test 6-8 người.",
+        guild=guild_obj,
+    )
+    @app_commands.describe(
+        players="Số người cần test (6-8)",
+        fight_idx="Số trận hiển thị trong tiêu đề modal (mặc định: 1)",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def demo_score_modal(
+        interaction: discord.Interaction,
+        players: int = 8,
+        fight_idx: int = 1,
+    ) -> None:
+        if players < 6 or players > 8:
+            await safe_send_interaction(
+                interaction,
+                "demo_score_modal",
+                "❌ `players` chỉ hỗ trợ từ **6** đến **8** để test đúng bài toán hiện tại.",
+                ephemeral=True,
+            )
+            return
+
+        if fight_idx < 1 or fight_idx > 10:
+            await safe_send_interaction(
+                interaction,
+                "demo_score_modal",
+                "❌ `fight_idx` phải từ **1** đến **10**.",
+                ephemeral=True,
+            )
+            return
+
+        entries = [(f"player_{i}", f"Demo Player {i}") for i in range(1, players + 1)]
+        pages = _chunk_demo_entries(entries, _DEMO_MODAL_PAGE_SIZE)
+        page1 = pages[0]
+        overflow = [entry for page in pages[1:] for entry in page]
+        total_pages = len(pages)
+        partial_scores = {key: "0" for key, _ in entries}
+
+        modal = DemoScoreModal(
+            fight_idx=fight_idx,
+            page_entries=page1,
+            overflow_entries=overflow,
+            partial_scores=partial_scores,
+            page_index=1,
+            total_pages=total_pages,
+        )
+
+        try:
+            await interaction.response.send_modal(modal)
+        except discord.NotFound as exc:
+            if is_interaction_expired(exc):
+                log.warning("Interaction expired sending demo_score_modal (user=%s)", interaction.user.id)
+            else:
+                log.error("NotFound sending demo_score_modal (user=%s): %s", interaction.user.id, exc)
+        except discord.HTTPException as exc:
+            log.error("HTTP error sending demo_score_modal (user=%s): %s", interaction.user.id, exc)
 
     # ── Admin: test full flow ─────────────────────────────────────────────────
 

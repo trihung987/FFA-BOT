@@ -19,7 +19,7 @@ from config import (
     MIN_PLAYERS_REQUIRED,
     LOBBY_CATEGORY_ID,
 )
-from entity import Match, User
+from entity import Match, User, Lobby
 from helpers import now_vn, format_vn_time, parse_duration
 
 log = logging.getLogger(__name__)
@@ -42,10 +42,11 @@ def get_divide_message_ids(match_id: int) -> list[int]:
 
 def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
     """
-    Create and return the four periodic task loops:
+    Create and return periodic task loops:
 
     - ``match_scheduler``          – checks for upcoming check-in windows and posts reminders.
     - ``cleanup_scheduler``        – marks finished matches with an end_time.
+    - ``result_publish_scheduler`` – posts result-entry messages when match start time is reached.
     - ``monthly_reset_scheduler``  – resets monthly_elo_gain for all users on the 1st of each month.
     - ``message_cleanup_scheduler`` – deletes bot messages for matches ended/cancelled 6+ hours ago.
 
@@ -451,6 +452,96 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
     async def cleanup_scheduler_error(error: Exception) -> None:
         log.exception("cleanup_scheduler loop crashed")
 
+    @tasks.loop(minutes=1)
+    async def result_publish_scheduler() -> None:
+        """Post result-entry embeds only when the match reaches its start time."""
+        if not RESULT_CHANNEL_ID:
+            return
+
+        now = now_vn()
+        result_channel = bot.get_channel(RESULT_CHANNEL_ID)
+        if result_channel is None:
+            log.warning("result_publish_scheduler: result channel %s not found", RESULT_CHANNEL_ID)
+            return
+
+        try:
+            with db_session_factory() as session:
+                pending_pairs = (
+                    session.query(Lobby.id, Match.id)
+                    .join(Match, Match.id == Lobby.match_id)
+                    .filter(
+                        Match.end_time.is_(None),
+                        Match.status == "dividing",
+                        Match.time_start <= now,
+                        Lobby.result_message_id.is_(None),
+                    )
+                    .all()
+                )
+        except Exception:
+            log.exception("result_publish_scheduler: DB error fetching pending result messages")
+            return
+
+        if not pending_pairs:
+            return
+
+        from views import LobbyResultView, build_lobby_result_message_assets
+
+        for lobby_id, match_id in pending_pairs:
+            try:
+                with db_session_factory() as session:
+                    lobby = session.get(Lobby, lobby_id)
+                    match = session.get(Match, match_id)
+                    if lobby is None or match is None:
+                        continue
+                    if lobby.result_message_id is not None:
+                        continue
+
+                    user_ids = list(lobby.users_list or [])
+                    if user_ids:
+                        users = session.query(User).filter(User.id.in_(user_ids)).all()
+                        p_map = {u.id: (u.ingame_name or "Unknown") for u in users}
+                    else:
+                        p_map = {}
+
+                result_embed, result_file = build_lobby_result_message_assets(lobby, match, p_map)
+                view = LobbyResultView(
+                    lobby_id=lobby.id,
+                    count_fight=match.count_fight,
+                    map_names=match.name_maps or [],
+                    db_session_factory=db_session_factory,
+                )
+                if result_file is not None:
+                    result_msg = await result_channel.send(embed=result_embed, view=view, file=result_file)
+                else:
+                    result_msg = await result_channel.send(embed=result_embed, view=view)
+
+                with db_session_factory() as session:
+                    claimed = (
+                        session.query(Lobby)
+                        .filter(
+                            Lobby.id == lobby_id,
+                            Lobby.result_message_id.is_(None),
+                        )
+                        .update({"result_message_id": result_msg.id}, synchronize_session=False)
+                    )
+                    session.commit()
+
+                if claimed == 0:
+                    try:
+                        await result_msg.delete()
+                    except Exception:
+                        pass
+            except Exception:
+                log.exception(
+                    "result_publish_scheduler: failed to post result message (lobby=%s, match=%s)",
+                    lobby_id,
+                    match_id,
+                )
+
+    @result_publish_scheduler.error
+    async def result_publish_scheduler_error(error: Exception) -> None:
+        log.exception("result_publish_scheduler loop crashed")
+
     @tasks.loop(hours=1)
     async def monthly_reset_scheduler() -> None:
         """Reset monthly_elo_gain for all users once per calendar month.
@@ -513,8 +604,6 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
 
         Message IDs are set to NULL after deletion to avoid repeated attempts.
         """
-        from entity import Lobby
-
         now = now_vn()
         cutoff = now - timedelta(hours=6)
 
@@ -644,4 +733,10 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
     async def message_cleanup_scheduler_error(error: Exception) -> None:
         log.exception("message_cleanup_scheduler loop crashed")
 
-    return match_scheduler, cleanup_scheduler, monthly_reset_scheduler, message_cleanup_scheduler
+    return (
+        match_scheduler,
+        cleanup_scheduler,
+        result_publish_scheduler,
+        monthly_reset_scheduler,
+        message_cleanup_scheduler,
+    )

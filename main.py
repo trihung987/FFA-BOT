@@ -39,7 +39,13 @@ register_match_commands(bot, SessionLocal)
 register_leaderboard_commands(bot, SessionLocal)
 
 # Create background schedulers (they are started inside on_ready)
-match_scheduler, cleanup_scheduler, monthly_reset_scheduler, message_cleanup_scheduler = setup_scheduler(bot, SessionLocal)
+(
+    match_scheduler,
+    cleanup_scheduler,
+    result_publish_scheduler,
+    monthly_reset_scheduler,
+    message_cleanup_scheduler,
+) = setup_scheduler(bot, SessionLocal)
 
 
 # ── Global error handler ───────────────────────────────────────────────────────
@@ -96,6 +102,8 @@ async def on_ready():
         match_scheduler.start()
     if not cleanup_scheduler.is_running():
         cleanup_scheduler.start()
+    if not result_publish_scheduler.is_running():
+        result_publish_scheduler.start()
     if not monthly_reset_scheduler.is_running():
         monthly_reset_scheduler.start()
     if not message_cleanup_scheduler.is_running():

@@ -29,6 +29,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Bundled fonts (ship with repo) so Pillow rendering is stable on servers.
+FONT_BASE_DIR = Path(__file__).resolve().parent / "Be_Vietnam_Pro,Noto_Sans,Poppins"
+BE_VIETNAM_PRO_DIR = FONT_BASE_DIR / "Be_Vietnam_Pro"
+NOTO_SANS_DIR = FONT_BASE_DIR / "Noto_Sans" / "static"
+
 # ── Civilization pool ──────────────────────────────────────────────────────────
 # Each entry is a Discord custom-emoji string, e.g. "<:civ_anh:1234567890>".
 # Leave as empty strings "" – admin fills in the actual emoji codes before deploy.
@@ -384,18 +389,24 @@ async def build_lobby_display_image_file(
     img.alpha_composite(overlay)
     draw = ImageDraw.Draw(img)
 
-    try:
-        font_title = ImageFont.truetype("arialbd.ttf", 34)
-        font_subtitle = ImageFont.truetype("arial.ttf", 19)
-        font_header = ImageFont.truetype("arial.ttf", 22)
-        font_header_bold = ImageFont.truetype("arialbd.ttf", 22)
-        font_cell = ImageFont.truetype("arial.ttf", 20)
-    except Exception:
-        font_title = ImageFont.load_default()
-        font_subtitle = ImageFont.load_default()
-        font_header = ImageFont.load_default()
-        font_header_bold = ImageFont.load_default()
-        font_cell = ImageFont.load_default()
+    def _load_font(size: int, *, bold: bool = False):
+        candidates = [
+            BE_VIETNAM_PRO_DIR / ("BeVietnamPro-Bold.ttf" if bold else "BeVietnamPro-Regular.ttf"),
+            NOTO_SANS_DIR / ("NotoSans-Bold.ttf" if bold else "NotoSans-Regular.ttf"),
+        ]
+        for path in candidates:
+            if path.exists():
+                try:
+                    return ImageFont.truetype(str(path), size)
+                except Exception:
+                    continue
+        return ImageFont.load_default()
+
+    font_title = _load_font(34, bold=True)
+    font_subtitle = _load_font(19)
+    font_header = _load_font(22)
+    font_header_bold = _load_font(22, bold=True)
+    font_cell = _load_font(20)
 
     table_x = pad
     table_y = pad + title_h + subtitle_h
@@ -555,7 +566,7 @@ async def create_lobby_channels(
     category: discord.CategoryChannel | None,
     judge_role: discord.Role | None,
 ) -> tuple[list[int], list[int]]:
-    """Create one voice channel and one text channel per fight for the lobby.
+    """Create one voice channel per lobby and one text channel per fight.
 
     Channels are visible only to players in the lobby, admins, and holders of
     *judge_role* (if provided).
@@ -563,7 +574,8 @@ async def create_lobby_channels(
     Returns
     -------
     (voice_channel_ids, text_channel_ids)
-        Lists of Discord channel IDs, indexed by fight number (0-based).
+        Voice list contains a single lobby voice channel ID.
+        Text list contains one channel ID per fight (0-based order).
     """
     # Permission overwrites: 
     voice_overwrites: dict = {
@@ -600,17 +612,18 @@ async def create_lobby_channels(
     voice_ids: list[int] = []
     text_ids: list[int] = []
 
+    # One shared voice room for the whole lobby.
+    vc = await guild.create_voice_channel(
+        name=f"🎮 Lobby {lobby.tier} #{lobby.lobby_number}",
+        overwrites=voice_overwrites,
+        category=category,
+    )
+    voice_ids.append(vc.id)
+
     for i in range(1, match.count_fight + 1):
         map_name = map_names[i - 1] if i - 1 < len(map_names) else f"map{i}"
         # Sanitise map name for channel name (Discord channel names: lowercase, no spaces)
         map_slug = map_name.lower().replace(" ", "-")
-
-        vc = await guild.create_voice_channel(
-            name=f"🎮 Lobby {lobby.tier} #{lobby.lobby_number} · Trận {i}",
-            overwrites=voice_overwrites,
-            category=category,
-        )
-        voice_ids.append(vc.id)
 
         tc = await guild.create_text_channel(
             name=f"lobby-{tier_short}{lobby.lobby_number}-tran{i}-{map_slug}",
@@ -618,6 +631,18 @@ async def create_lobby_channels(
             category=category,
         )
         text_ids.append(tc.id)
+        try:
+            await tc.send(
+                "@here\n"
+                f"**Kênh chat này dùng để khai báo điểm số Trận {i} - Map {map_name}.**\n"
+                "**Mỗi người tựkKhai báo điểm (Vua/Firstblood) ăn được tại đây để admin/trọng tài kiểm tra và nhập kết quả.**"
+            )
+        except discord.HTTPException:
+            log.warning(
+                "create_lobby_channels: failed to send score-note message (lobby=%s, fight=%s)",
+                getattr(lobby, "id", None),
+                i,
+            )
 
     return voice_ids, text_ids
 
@@ -652,16 +677,12 @@ async def divide_lobbies(
     from entity import Match, User, Lobby
     from config import (
         DIVIDE_LOBBY_CHANNEL_ID,
-        RESULT_CHANNEL_ID,
         JUDGE_ROLE_ID,
         LOBBY_CATEGORY_ID,
     )
     from helpers import now_vn
-    from views import LobbyResultView, build_lobby_result_message_assets
 
     announce_channel = bot.get_channel(DIVIDE_LOBBY_CHANNEL_ID)
-    result_channel = bot.get_channel(RESULT_CHANNEL_ID) if RESULT_CHANNEL_ID else None
-
     async def _announce(*args, **kwargs):
         if not announce_channel:
             return None
@@ -1011,25 +1032,7 @@ async def divide_lobbies(
                         db_lobby.display_message_ids = ids
                         session.commit()
 
-        # Send result-entry embed + buttons to result channel
-        if result_channel:
-            result_embed, result_file = build_lobby_result_message_assets(lobby_snap, match_snap, p_map)
-            view = LobbyResultView(
-                lobby_id=lobby_id,
-                count_fight=match.count_fight,
-                map_names=match.name_maps or [],
-                db_session_factory=db_session_factory,
-            )
-            if result_file is not None:
-                result_msg = await result_channel.send(embed=result_embed, view=view, file=result_file)
-            else:
-                result_msg = await result_channel.send(embed=result_embed, view=view)
-
-            with db_session_factory() as session:
-                db_lobby = session.get(Lobby, lobby_id)
-                if db_lobby:
-                    db_lobby.result_message_id = result_msg.id
-                    session.commit()
+        # Result-entry message is posted later by scheduler at match start time.
 
 
 # ── Lightweight snapshot dataclasses (avoid detached-instance issues) ──────────
