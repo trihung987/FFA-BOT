@@ -43,7 +43,7 @@ RANK_ANSI = {
 # Header/title: standard green text
 BORDER_ANSI = "32"
 HEADER_ANSI = "1;32"  
-PAGE_SIZE = 8
+PAGE_SIZE = 10
 
 # ── Column widths (number of visible characters, not bytes) ───────────────────
 W_POS     = 4   # # (supports #10, #100 without truncation)

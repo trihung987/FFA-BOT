@@ -981,7 +981,13 @@ class LobbyResultView(discord.ui.View):
                 self._rollup_match_status_after_lobby_resolution(session, match, now_vn())
                 session.commit()
 
-                new_embed = build_lobby_result_embed(lobby, match) if match else None
+                _uids = lobby.users_list or []
+                _p_map = _load_player_map(session, _uids)
+                new_embed, new_file = (
+                    build_lobby_result_message_assets(lobby, match, _p_map)
+                    if match
+                    else (None, None)
+                )
         except Exception:
             log.exception("DB error in _cancel_lobby (lobby=%s, user=%s)", self.lobby_id, interaction.user.id)
             await _safe_edit_original_response(
@@ -992,12 +998,11 @@ class LobbyResultView(discord.ui.View):
             return
 
         if new_embed:
-            if interaction.message is not None and interaction.message.attachments:
-                new_embed.set_image(url=interaction.message.attachments[0].url)
-            else:
-                new_embed.set_image(url=None)
-
             kwargs = {"embed": new_embed, "view": discord.ui.View()}
+            if new_file is not None:
+                kwargs["attachments"] = [new_file]
+            else:
+                kwargs["attachments"] = []
             if interaction.message is not None:
                 await _safe_message_edit(
                     interaction.message,
