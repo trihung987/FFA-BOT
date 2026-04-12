@@ -37,11 +37,11 @@ def build_lobby_result_embed(lobby, match, p_map: dict[int, str] | None = None) 
 
     status = lobby.status or "active"
     if status == "finished":
-        title = f"{emoji} Kết Quả - Lobby {tier} #{lobby.lobby_number}"
+        title = f"{emoji} Kết Quả Trận `#{match.id}` - Lobby {tier} #{lobby.lobby_number}"
     elif status == "cancelled":
-        title = f"{emoji} Đã Hủy Kết Quả - Lobby {tier} #{lobby.lobby_number}"
+        title = f"{emoji} Đã Hủy Kết Quả Trận `#{match.id}` - Lobby {tier} #{lobby.lobby_number}"
     else:
-        title = f"{emoji} Nhập Kết Quả - Lobby {tier} #{lobby.lobby_number}"
+        title = f"{emoji} Nhập Kết Quả Trận `#{match.id}` - Lobby {tier} #{lobby.lobby_number}"
 
     status_labels = {
         "active": "🟢 Đang diễn ra",

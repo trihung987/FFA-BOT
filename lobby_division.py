@@ -601,12 +601,12 @@ async def create_lobby_channels(
                 view_channel=True, connect=True, send_messages=True
             )
 
-    tier_short = {
-        TIER_LEGENDARY: "hl",
-        TIER_CONQUEST: "cp",
-        TIER_DIAMOND: "kc",
-        TIER_RECRUIT: "tb",
-    }.get(lobby.tier, "lby")
+    tier_full_slug = {
+        TIER_LEGENDARY: "huyền-thoại",
+        TIER_CONQUEST: "chinh-phạt",
+        TIER_DIAMOND: "kim-cương",
+        TIER_RECRUIT: "tân-binh",
+    }.get(lobby.tier, "lobby")
     map_names: list = match.name_maps or []
 
     voice_ids: list[int] = []
@@ -614,7 +614,7 @@ async def create_lobby_channels(
 
     # One shared voice room for the whole lobby.
     vc = await guild.create_voice_channel(
-        name=f"🎮 Lobby {lobby.tier} #{lobby.lobby_number}",
+        name=f"🎮 Trận#{match.id} Lobby {lobby.tier} #{lobby.lobby_number}",
         overwrites=voice_overwrites,
         category=category,
     )
@@ -622,11 +622,9 @@ async def create_lobby_channels(
 
     for i in range(1, match.count_fight + 1):
         map_name = map_names[i - 1] if i - 1 < len(map_names) else f"map{i}"
-        # Sanitise map name for channel name (Discord channel names: lowercase, no spaces)
-        map_slug = map_name.lower().replace(" ", "-")
 
         tc = await guild.create_text_channel(
-            name=f"lobby-{tier_short}{lobby.lobby_number}-tran{i}-{map_slug}",
+            name=f"Khai-báo-trận-{match.id}-{tier_full_slug}-{lobby.lobby_number}",
             overwrites=text_overwrites,
             category=category,
         )
@@ -634,7 +632,7 @@ async def create_lobby_channels(
         try:
             await tc.send(
                 "@here\n"
-                f"**Kênh chat này dùng để khai báo điểm số Trận {i} - Map {map_name}.**\n"
+                f"**[Trận #{match.id}] Lobby {tier_full_slug.upper()} - Kênh chat này dùng để khai báo điểm số Ván {i} - Map {map_name}.**\n"
                 "**Mỗi người tự Khai báo điểm (Vua/Firstblood) ăn được tại đây để admin/trọng tài kiểm tra và nhập kết quả.**"
             )
         except discord.HTTPException:
