@@ -633,7 +633,8 @@ async def create_lobby_channels(
             await tc.send(
                 "@here\n"
                 f"**[Trận #{match.id}] Lobby {tier_full_slug.upper()} - Kênh chat này dùng để khai báo điểm số Ván {i} - Map {map_name}.**\n"
-                "**Mỗi người tự Khai báo điểm (Vua/Firstblood) ăn được tại đây để admin/trọng tài kiểm tra và nhập kết quả.**"
+                "**Mỗi người tự Khai báo điểm (Vua/Bể landmark trước/Firstblood) ăn được tại đây để admin/trọng tài kiểm tra và nhập kết quả.**\n"
+                "⚠️ **Nếu có hành vi không đúng quy tắc hoặc tranh chấp, vui lòng tag @Ban tổ chức hoặc @Trọng tài để xử lý.**"
             )
         except discord.HTTPException:
             log.warning(
