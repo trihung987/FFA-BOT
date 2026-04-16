@@ -1087,6 +1087,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             return
 
         p_map = {admin_id: ingame_name}
+        ticket_map = {admin_id: 0}
 
         # ── 3. Post registration embed (closed – checkin already started) ──────
         reg_channel = interaction.client.get_channel(_REG_CH) if _REG_CH else None
@@ -1094,7 +1095,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             try:
                 with db_session_factory() as session:
                     db_match = session.get(Match, match_id)
-                    reg_embed = build_registration_embed(db_match, p_map, checkin_started=True)
+                    reg_embed = build_registration_embed(db_match, p_map, ticket_map, checkin_started=True)
                 reg_msg = await reg_channel.send(embed=reg_embed, view=build_disabled_registration_view())
                 with db_session_factory() as session:
                     db_match = session.get(Match, match_id)
@@ -1110,7 +1111,7 @@ def register_match_commands(bot: ext_commands.Bot, db_session_factory) -> None:
             try:
                 with db_session_factory() as session:
                     db_match = session.get(Match, match_id)
-                    checkin_embed = build_checkin_embed(db_match, p_map, ended=True)
+                    checkin_embed = build_checkin_embed(db_match, p_map, ticket_map, ended=True)
                     registered_mentions = build_registered_mentions(db_match.register_users_id if db_match else [])
                 checkin_msg = await checkin_channel.send(
                     content=registered_mentions,

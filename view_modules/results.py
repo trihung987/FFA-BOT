@@ -262,7 +262,7 @@ def build_lobby_result_image_file(lobby, match, p_map: dict[int, str] | None = N
 
     final_img = Image.alpha_composite(base, overlay).convert("RGB")
     buffer = BytesIO()
-    final_img.save(buffer, format="PNG", optimize=True)
+    final_img.save(buffer, format="PNG", optimize=False, compress_level=4)
     image_bytes = buffer.getvalue()
 
     if isinstance(lobby_id, int):
@@ -280,6 +280,15 @@ def build_lobby_result_message_assets(lobby, match, p_map: dict[int, str] | None
     if image_file is None:
         embed.set_image(url=None)
     return embed, image_file
+
+
+async def build_lobby_result_message_assets_async(
+    lobby,
+    match,
+    p_map: dict[int, str] | None = None,
+) -> tuple[discord.Embed, discord.File | None]:
+    """Build result embed/image off the main event loop to avoid heartbeat stalls."""
+    return await asyncio.to_thread(build_lobby_result_message_assets, lobby, match, p_map)
 
 
 _warm_lobby_result_font_cache()
@@ -770,7 +779,7 @@ class LobbyResultView(discord.ui.View):
 
                 _uids = lobby.users_list or []
                 _p_map = _load_player_map(session, _uids)
-                new_embed, new_file = build_lobby_result_message_assets(lobby, match, _p_map)
+                new_embed, new_file = await build_lobby_result_message_assets_async(lobby, match, _p_map)
                 reload_success = True
         except Exception:
             log.exception("DB/render error in _reload_result (lobby=%s, user=%s)", self.lobby_id, interaction.user.id)
@@ -984,7 +993,7 @@ class LobbyResultView(discord.ui.View):
                 _uids = lobby.users_list or []
                 _p_map = _load_player_map(session, _uids)
                 new_embed, new_file = (
-                    build_lobby_result_message_assets(lobby, match, _p_map)
+                    await build_lobby_result_message_assets_async(lobby, match, _p_map)
                     if match
                     else (None, None)
                 )
@@ -1119,7 +1128,7 @@ class LobbyResultView(discord.ui.View):
                 _uids = lobby.users_list or []
                 _p_map = _load_player_map(session, _uids)
                 new_embed, new_file = (
-                    build_lobby_result_message_assets(lobby, match, _p_map)
+                    await build_lobby_result_message_assets_async(lobby, match, _p_map)
                     if match
                     else (None, None)
                 )

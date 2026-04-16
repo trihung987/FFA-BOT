@@ -92,6 +92,26 @@ def _load_player_map(session, user_ids: list[int]) -> dict[int, str]:
     return {u.id: (u.ingame_name or "Unknown") for u in users}
 
 
+def _load_player_ticket_map(session, user_ids: list[int]) -> dict[int, int]:
+    """Return a dict mapping Discord user ID -> current ticket count."""
+    from entity import User
+
+    if not user_ids:
+        return {}
+    users = session.query(User).filter(User.id.in_(user_ids)).all()
+    return {u.id: int(u.ticket or 0) for u in users}
+
+
+def _ticket_status(ticket_map: dict[int, int], uid: int) -> str:
+    return "có vé" if ticket_map.get(uid, 0) > 0 else "không có vé"
+
+
+def _count_ticket_groups(user_ids: list[int], ticket_map: dict[int, int]) -> tuple[int, int]:
+    with_ticket = sum(1 for uid in user_ids if ticket_map.get(uid, 0) > 0)
+    without_ticket = len(user_ids) - with_ticket
+    return with_ticket, without_ticket
+
+
 def build_registered_mentions(user_ids: list[int] | None) -> str:
     """Build a de-duplicated mention string for registered players."""
     if not user_ids:
@@ -109,7 +129,14 @@ def build_registered_mentions(user_ids: list[int] | None) -> str:
     return " ".join(f"<@{uid}>" for uid in ordered_ids)
 
 
-def build_registration_embed(match, p_map: dict[int, str], *, checkin_started: bool = False, cancelled: bool = False) -> discord.Embed:
+def build_registration_embed(
+    match,
+    p_map: dict[int, str],
+    ticket_map: dict[int, int] | None = None,
+    *,
+    checkin_started: bool = False,
+    cancelled: bool = False,
+) -> discord.Embed:
     """Build (or rebuild) the registration embed for a match."""
     time_start = match.time_start
 
@@ -129,9 +156,14 @@ def build_registration_embed(match, p_map: dict[int, str], *, checkin_started: b
 
     registered = match.register_users_id or []
     map_names = match.name_maps or []
+    ticket_map = ticket_map or {}
+    with_ticket_count, without_ticket_count = _count_ticket_groups(registered, ticket_map)
 
     reg_list_str = (
-        "\n".join(f"<@{uid}> - {p_map.get(uid, 'Unknown')}" for uid in registered)
+        "\n".join(
+            f"<@{uid}> - {p_map.get(uid, 'Unknown')} - {_ticket_status(ticket_map, uid)}"
+            for uid in registered
+        )
         or "_(chưa có ai)_"
     )
 
@@ -143,6 +175,7 @@ def build_registration_embed(match, p_map: dict[int, str], *, checkin_started: b
         f"📅 **Giờ bắt đầu:** {format_vn_time(time_start)}\n"
         f"🗺️ **Maps:** {', '.join(map_names)}\n\n"
         f"👥 **Đã đăng ký: {len(registered)} người**\n"
+        f"🎫 **Có vé:** {with_ticket_count} | **Không có vé:** {without_ticket_count}\n"
         f"{reg_list_str}"
     )
 
@@ -163,11 +196,20 @@ def build_registration_embed(match, p_map: dict[int, str], *, checkin_started: b
     )
 
 
-def build_checkin_embed(match, p_map: dict[int, str], *, ended: bool = False, cancelled: bool = False) -> discord.Embed:
+def build_checkin_embed(
+    match,
+    p_map: dict[int, str],
+    ticket_map: dict[int, int] | None = None,
+    *,
+    ended: bool = False,
+    cancelled: bool = False,
+) -> discord.Embed:
     """Build (or rebuild) the check-in embed for a match."""
     time_start = match.time_start
     registered = match.register_users_id or []
     checked_in = match.checkin_users_id or []
+    ticket_map = ticket_map or {}
+    with_ticket_count, without_ticket_count = _count_ticket_groups(checked_in, ticket_map)
 
     try:
         checkin_open_dt = time_start - parse_duration(match.time_reach_checkin)
@@ -177,7 +219,10 @@ def build_checkin_embed(match, p_map: dict[int, str], *, ended: bool = False, ca
         checkin_window = "N/A"
 
     checkin_list_str = (
-        "\n".join(f"- {p_map.get(u, 'Unknown')} ✅" for u in checked_in)
+        "\n".join(
+            f"- {p_map.get(u, 'Unknown')} - {_ticket_status(ticket_map, u)} ✅"
+            for u in checked_in
+        )
         or "_(chưa có ai)_"
     )
 
@@ -185,6 +230,7 @@ def build_checkin_embed(match, p_map: dict[int, str], *, ended: bool = False, ca
         f"🆔 **ID trận:** #{match.id}\n"
         f"⏰ **Thời gian check-in:** {checkin_window}\n"
         f"👥 **Đã check-in:** {len(checked_in)}/{len(registered)}\n\n"
+        f"🎫 **Có vé:** {with_ticket_count} | **Không có vé:** {without_ticket_count}\n"
         f"✅ **Danh sách check-in:**\n{checkin_list_str}"
     )
 

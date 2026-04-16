@@ -624,7 +624,7 @@ async def create_lobby_channels(
         map_name = map_names[i - 1] if i - 1 < len(map_names) else f"map{i}"
 
         tc = await guild.create_text_channel(
-            name=f"Khai-báo-trận-{match.id}-{tier_full_slug}-{lobby.lobby_number}",
+            name=f"Khai-báo-trận-{match.id}-{tier_full_slug}-{lobby.lobby_number}-ván-{i}",
             overwrites=text_overwrites,
             category=category,
         )
@@ -743,6 +743,27 @@ async def divide_lobbies(
     has_ticket_group.sort(key=lambda x: x[1], reverse=True)
     no_ticket_group.sort(key=lambda x: x[1], reverse=True)
 
+    if announce_channel:
+        def _fmt_player(uid: int) -> str:
+            user = user_map.get(uid)
+            ingame_name = (user.ingame_name if user else None) or "Unknown"
+            return f"<@{uid}> - {ingame_name}"
+
+        has_ticket_lines = (
+            "\n".join(f"- có vé: {_fmt_player(uid)}" for uid, _ in has_ticket_group)
+            or "- có vé: _(không có ai)_"
+        )
+        no_ticket_lines = (
+            "\n".join(f"- không có vé: {_fmt_player(uid)}" for uid, _ in no_ticket_group)
+            or "- không có vé: _(không có ai)_"
+        )
+
+        await _announce(
+            f"📋 **Trận #{match.id}** – Danh sách người chơi check-in:\n"
+            f"{has_ticket_lines}\n"
+            f"{no_ticket_lines}"
+        )
+
     # ── Step 3: ELO-based eligibility filter ──────────────────────────────────
     cannot_join_group: list[tuple[int, int]] = []
     if has_ticket_group:
@@ -761,7 +782,7 @@ async def divide_lobbies(
         names = ", ".join(f"<@{uid}>" for uid, _ in cannot_join_group)
         await _announce(
             f"⚠️ **Trận #{match.id}** – Những người chơi sau không đủ điều kiện "
-            f"tham gia (ELO cao hơn ELO thấp nhất của nhóm có vé nhưng không có vé): "
+            f"tham gia (ELO cao hơn ELO thấp nhất của nhóm có vé nhưng bản thân lại không có vé): "
             f"{names}"
         )
 

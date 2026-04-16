@@ -26,6 +26,32 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+
+class _IgnoreExpiredAutocompleteFilter(logging.Filter):
+    """Drop discord.py autocomplete stack traces for expired interactions (10062)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "discord.app_commands.tree":
+            return True
+
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+
+        if "Ignoring exception in autocomplete" not in message:
+            return True
+
+        exc_info = record.exc_info
+        if not exc_info or len(exc_info) < 2:
+            return True
+
+        exc = exc_info[1]
+        return not (isinstance(exc, discord.NotFound) and getattr(exc, "code", None) == 10062)
+
+
+logging.getLogger("discord.app_commands.tree").addFilter(_IgnoreExpiredAutocompleteFilter())
+
 guild_obj = discord.Object(id=GUILD_ID)
 
 # ── Bot setup ──────────────────────────────────────────────────────────────────

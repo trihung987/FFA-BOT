@@ -132,13 +132,19 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                         # Edit the registration embed to show the cancellation notice with disabled buttons
                         if register_channel and reg_msg_id:
                             try:
-                                from views import build_registration_embed, _load_player_map, build_disabled_registration_view
+                                from views import (
+                                    build_registration_embed,
+                                    _load_player_map,
+                                    _load_player_ticket_map,
+                                    build_disabled_registration_view,
+                                )
 
                                 reg_msg = await register_channel.fetch_message(reg_msg_id)
                                 with db_session_factory() as session:
                                     db_match = session.get(Match, match.id)
                                     p_map = _load_player_map(session, registered)
-                                    cancelled_embed = build_registration_embed(db_match, p_map, cancelled=True)
+                                    ticket_map = _load_player_ticket_map(session, registered)
+                                    cancelled_embed = build_registration_embed(db_match, p_map, ticket_map, cancelled=True)
                                 await reg_msg.edit(embed=cancelled_embed, view=build_disabled_registration_view())
                             except discord.NotFound:
                                 log.debug(
@@ -171,13 +177,19 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                     # 1. Edit registration message: disable buttons + add "check-in started" notice
                     if register_channel and reg_msg_id:
                         try:
-                            from views import build_registration_embed, _load_player_map, build_disabled_registration_view
+                            from views import (
+                                build_registration_embed,
+                                _load_player_map,
+                                _load_player_ticket_map,
+                                build_disabled_registration_view,
+                            )
 
                             reg_msg = await register_channel.fetch_message(reg_msg_id)
                             with db_session_factory() as session:
                                 db_match = session.get(Match, match.id)
                                 p_map = _load_player_map(session, registered)
-                                reg_embed = build_registration_embed(db_match, p_map, checkin_started=True)
+                                ticket_map = _load_player_ticket_map(session, registered)
+                                reg_embed = build_registration_embed(db_match, p_map, ticket_map, checkin_started=True)
                             await reg_msg.edit(embed=reg_embed, view=build_disabled_registration_view())
                         except discord.NotFound:
                             log.debug(
@@ -198,7 +210,13 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                     # 2. Send check-in embed to the check-in channel
                     checkin_channel = bot.get_channel(CHECKIN_CHANNEL_ID)
                     if checkin_channel:
-                        from views import CheckInView, build_checkin_embed, _load_player_map, build_registered_mentions
+                        from views import (
+                            CheckInView,
+                            build_checkin_embed,
+                            _load_player_map,
+                            _load_player_ticket_map,
+                            build_registered_mentions,
+                        )
 
                         # Build the initial check-in embed with current player names
                         try:
@@ -211,7 +229,8 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                                     )
                                     continue
                                 p_map = _load_player_map(session, registered)
-                                embed = build_checkin_embed(db_match, p_map)
+                                ticket_map = _load_player_ticket_map(session, registered)
+                                embed = build_checkin_embed(db_match, p_map, ticket_map)
                         except Exception:
                             log.exception(
                                 "match_scheduler: DB error building check-in embed for match #%s",
@@ -325,7 +344,12 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                 checkin_channel = bot.get_channel(CHECKIN_CHANNEL_ID)
                 if checkin_channel and snap.checkin_message_id:
                     try:
-                        from views import build_checkin_embed, _load_player_map, build_disabled_checkin_view
+                        from views import (
+                            build_checkin_embed,
+                            _load_player_map,
+                            _load_player_ticket_map,
+                            build_disabled_checkin_view,
+                        )
 
                         checkin_msg_obj = await checkin_channel.fetch_message(snap.checkin_message_id)
                         with db_session_factory() as session:
@@ -334,11 +358,12 @@ def setup_scheduler(bot: ext_commands.Bot, db_session_factory):
                                 set((db_match.register_users_id or []) + (db_match.checkin_users_id or []))
                             ) if db_match else []
                             p_map = _load_player_map(session, all_ids)
+                            ticket_map = _load_player_ticket_map(session, all_ids)
                             checkin_count = len(db_match.checkin_users_id or []) if db_match else 0
                             if checkin_count < MIN_PLAYERS_REQUIRED:
-                                closed_embed = build_checkin_embed(db_match, p_map, cancelled=True)
+                                closed_embed = build_checkin_embed(db_match, p_map, ticket_map, cancelled=True)
                             else:
-                                closed_embed = build_checkin_embed(db_match, p_map, ended=True)
+                                closed_embed = build_checkin_embed(db_match, p_map, ticket_map, ended=True)
                         await checkin_msg_obj.edit(embed=closed_embed, view=build_disabled_checkin_view())
                     except discord.NotFound:
                         log.debug(

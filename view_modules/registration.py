@@ -9,6 +9,7 @@ from helpers import format_vn_time, now_vn, parse_duration
 
 from .common import (
     _load_player_map,
+    _load_player_ticket_map,
     _safe_edit,
     _safe_send,
     build_checkin_embed,
@@ -265,7 +266,8 @@ class RegistrationView(discord.ui.View):
                 session.refresh(match)
 
                 p_map = _load_player_map(session, registered)
-                new_embed = build_registration_embed(match, p_map)
+                ticket_map = _load_player_ticket_map(session, registered)
+                new_embed = build_registration_embed(match, p_map, ticket_map)
         except Exception:
             log.exception("Error in RegistrationView.join (match=%s, user=%s)", self.match_id, user_id)
             if not interaction.response.is_done():
@@ -308,7 +310,8 @@ class RegistrationView(discord.ui.View):
                 session.refresh(match)
 
                 p_map = _load_player_map(session, registered)
-                new_embed = build_registration_embed(match, p_map)
+                ticket_map = _load_player_ticket_map(session, registered)
+                new_embed = build_registration_embed(match, p_map, ticket_map)
         except Exception:
             log.exception("Error in RegistrationView.cancel (match=%s, user=%s)", self.match_id, user_id)
             if not interaction.response.is_done():
@@ -412,7 +415,8 @@ class CheckInView(discord.ui.View):
 
                 all_user_ids = list(set((match.register_users_id or []) + checked_in))
                 p_map = _load_player_map(session, all_user_ids)
-                new_embed = build_checkin_embed(match, p_map)
+                ticket_map = _load_player_ticket_map(session, all_user_ids)
+                new_embed = build_checkin_embed(match, p_map, ticket_map)
         except Exception:
             log.exception("Error in CheckInView.ready (match=%s, user=%s)", self.match_id, user_id)
             if not interaction.response.is_done():

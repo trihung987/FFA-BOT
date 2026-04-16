@@ -2,6 +2,7 @@
 
 from view_modules.common import (
     _load_player_map,
+    _load_player_ticket_map,
     _safe_defer,
     _safe_edit,
     _safe_edit_original_response,
@@ -31,6 +32,7 @@ from view_modules.results import (
 
 __all__ = [
     "_load_player_map",
+    "_load_player_ticket_map",
     "_safe_defer",
     "_safe_edit",
     "_safe_edit_original_response",
