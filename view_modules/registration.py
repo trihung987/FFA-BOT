@@ -10,6 +10,7 @@ from helpers import format_vn_time, now_vn, parse_duration
 from .common import (
     _load_player_map,
     _load_player_ticket_map,
+    _safe_defer,
     _safe_edit,
     _safe_send,
     build_checkin_embed,
@@ -52,6 +53,9 @@ class MapNamesModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         from entity import Match
+
+        if not await _safe_defer(interaction, "MapNamesModal.on_submit", ephemeral=True, thinking=True):
+            return
 
         map_names = [field.value for field in self._map_inputs]
 
